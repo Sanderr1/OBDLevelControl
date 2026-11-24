@@ -45,6 +45,10 @@ with jadx. Nothing here is guessed.
 | Session control (`10 03`), tester present (`3E 00`) | works |
 | Adapter generation read (`08` → 1/2/3, Pro 3) | works |
 | Demo mode (simulated heights, no BLE) | works |
+| Battery voltage channel | works — DID found by the automatic search |
+| Automatic DID discovery (`22` probing + scaling guesses) | works, ranges configurable |
+| Automatic RID discovery (`31 03` only, never starts anything) | works |
+| Quick raise / lower buttons | works once the four roles are mapped |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
 | 1st-gen adapter on iOS | **impossible** (Classic SPP, needs MFi) |
@@ -411,20 +415,64 @@ They are not in the APK. The full chain, verified:
 The APK has **no strings.xml, no bundled resources, no hardcoded DID or RID table**. That is why
 this app starts blank and ships scanners instead of a fake list.
 
+### So how does OBDeleven show "Battery voltage" with a value?
+
+The **names and the numbers come from the same ODX pack**, resolved per car:
+
+- A basic setting is a `<ROUTINE ID="…">` in the pack. Its display name is a `MAS…` text id; the
+  RID is what goes on the wire. The list under *Basic Settings* is exactly the routines the pack
+  defines for that control unit.
+- A measuring value is a `<DATA-OBJECT-PROP>` with a DID, a bit length and a `COMPU-METHOD`
+  (usually `SCALE-LINEAR` with a factor and offset). That is where "0.001 V" or "0.1 mm" comes
+  from — and why a raw DID is unreadable without it.
+- The pack is chosen after the VIN/scan and downloaded; nothing is shipped in the APK. Measured
+  values that were never in a pack cannot be named.
+
+This app cannot download the pack, so it **probes the ECU instead**: it asks `22 <did>` across a
+range and decodes every answer with the handful of scalings VAG actually uses, keeping only results
+that land in a physically possible band (8–16.5 V, 0.5–20 bar, −40–150 °C, 250–500 mm). A height
+DID that happens to be readable as 3.8 bar is discarded because the height interpretation fits
+better. That gives numbers and plausible ids without the ODX layer — but never the names.
+
+Routines are probed with `31 03` only. `31 03` asks for results and changes nothing; `31 01`
+*starts* the routine, so the automatic search never sends it. Every RID that answers `31 03` is a
+real basic setting in that control unit.
+
 ---
 
 ## 11. Finding your car's IDs
 
-### Routines
+### Automatically
 
-**Config → Scan routines**, start `0000`, count `64`. It sends `31 03 <rid>` for each id and logs
+*Inställningar → Autokonfigurering → Allt automatiskt* runs both searches with the configured
+ranges (default `0000` + 256 for DIDs and RIDs). With *Kör vid anslutning* on, it also runs once the
+first time an ECU is opened and any channel still has `DID 0000` — after that it stays quiet until
+you blank something again.
+
+What it does:
+
+- **Values** — asks `22 <did>` for each id in the range and decodes each answer with the standard
+  VAG scalings. The single best interpretation per DID is kept, then: one voltage → battery,
+  one pressure → the channel with unit `bar`, one temperature → the channel with unit `°C`, and the
+  four lowest ids that look like heights → the four wheel cards.
+- **Routines** — asks `31 03 <rid>` for each id in the range and turns every answer into a row in
+  the routine list, named `RID xxxx`. Map those to the buttons under *Funktionsmappning*.
+
+The result is shown as one line at the bottom of the card, e.g.
+`Auto: batteri 0A31 = 12.4 V · tryck 0A32 = 8.21 bar · Vänster fram 0A40 = 385 mm …`.
+Check the numbers in **Diagnostik** before you trust them — the scaling is a guess, the ODX file
+would be the truth.
+
+### Manually
+
+**Inställningar → Skanna**, start `0000`, count `64`. It sends `31 03 <rid>` for each id and logs
 every one that answers `71 03`. Repeat with `0064`, `0128`, … A handful of ids will respond; those
 are your basic settings. Cross-reference the order against what OBDeleven lists on Android
 (`34 – Level Control → Basic Settings`) to label them.
 
 ### DIDs
 
-**Config → Scan DIDs**:
+**Inställningar → Skanna**:
 
 1. Start `F180`, count `32` — identification block, always answers on UDS ECUs.
 2. Then walk `2B00`–`2BFF` and `0100`–`01FF`, which is where VAG puts live values.
@@ -458,6 +506,11 @@ open OBDLevel.xcodeproj
 
 Set your signing team, pick your iPhone, run.
 
+The icon lives in `OBDLevel/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` — a single
+1024×1024, 24-bit PNG with no alpha channel (alpha makes `actool` complain). `project.yml` sets
+`ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`; drop in your own PNG with the same name to replace
+it.
+
 ### Without XcodeGen
 
 1. Xcode → new iOS App → name `OBDLevel`, SwiftUI, Swift.
@@ -486,6 +539,9 @@ either talks to the adapter or, in demo mode, to a local simulation.
 
 **Översikt**
 - Four wheel heights in a 2×2 grid. `Läs nu` reads every channel; `Auto 2 s` repeats it.
+- **Höj & sänk** — the quick controls: `Höj` / `Sänk` per axle, one tap, running the mapped
+  routine. The same card gets a `Stoppa` button while anything is running, which sends `31 02` on
+  the next poll instead of waiting out the routine.
 - *Nivåreglering* is a switch. It sends the routine mapped to `Nivåreglering av` / `på` and keeps
   the app's own state, because the ECU does not expose a readable flag.
 - *Vent fram*, *Vent bak*, *Vent båda* are only enabled while level control is off — same
@@ -493,19 +549,25 @@ either talks to the adapter or, in demo mode, to a local simulation.
 - Live venting asks for confirmation first. The car moves.
 
 **System**
-- One card per channel after the fourth (defaults: `Systemtryck` in bar, `Kompressortemperatur`
-  in °C).
+- **Batteri** at the top: voltage with a colour band (≥12.4 V green, ≥11.8 V amber, below that red)
+  and the DID it came from. Missing DID means *run Autokonfigurering* or type it in yourself.
+- One card per channel after the fourth except the battery (defaults: `Systemtryck` in bar,
+  `Kompressortemperatur` in °C).
 - Compressor state and *Fyll behållare* / *Lufta behållare*, mapped by role.
 
 **Diagnostik**
 - Controller address, adapter + generation, link state, protocol, DTC status.
 - Every channel with decoded value, DID and raw response bytes — use this to verify scaling.
+- `Testa anslutning` runs protocol → generation → CAN ids → `10 03` → `3E 00` and reports where
+  it stopped.
 - Hex console for arbitrary UDS requests, and the frame log.
 
 **Inställningar**
 - Car name and vehicle line.
 - TX/RX CAN ids as hex fields, plus a shortcut to the adapter sheet.
-- *Funktionsmappning*: six roles → routine pickers. This is what wires the buttons on Översikt
+- *Autokonfigurering*: DID range, RID range, *Hitta värden*, *Hitta rutiner*, *Allt automatiskt*,
+  and *Kör vid anslutning*.
+- *Funktionsmappning*: ten roles → routine pickers. This is what wires the buttons on Översikt
   and System to actual RIDs.
 - Channel editor: name, DID, byte count, scale, unit, signed, add/remove.
 - Routine editor: name, RID, run and stop for any routine (not just mapped ones).
@@ -515,22 +577,27 @@ either talks to the adapter or, in demo mode, to a local simulation.
 ### Demo mode
 
 *Inställningar → Demoläge* runs the simulation from the HTML mockup: 385/388/392/390 mm,
-8.2 bar, 36 °C, the same ramp rates and the same interlock. Nothing is sent over BLE, and the
-header shows an amber `DEMO` badge.
+8.2 bar, 36 °C, 12.4 V, the same ramp rates and the same interlock. Nothing is sent over BLE, and
+the header shows an amber `DEMO` badge. *Höj* / *Sänk* move the simulated axle ±10 mm per tap, and
+the simulated battery drops a tenth while the compressor is filling.
 
 *Visa exempelvärden* hides or shows the numbers, exactly like the mockup's
 *Visa exempelvärden*. In live mode it has no effect: real readings are always shown.
 
-*Återställ demot* cancels running simulations and restores heights, pressure, temperature, level
-control and the value display.
+*Återställ demot* cancels running simulations and restores heights, pressure, temperature, battery,
+level control and the value display.
 
 ### Role mapping
 
 Routine ids are not guesses — but their names are per-car. Instead of hardcoding "vent front is
-RID 0x1234", the app maps six roles to whatever routines your profile contains:
+RID 0x1234", the app maps ten roles to whatever routines your profile contains:
 
 | Role | Button |
 |---|---|
+| `raiseFront` | Höj fram |
+| `lowerFront` | Sänk fram |
+| `raiseRear` | Höj bak |
+| `lowerRear` | Sänk bak |
 | `ventFront` | Vent fram |
 | `ventRear` | Vent bak |
 | `levelOff` | Nivåreglering av |
@@ -551,37 +618,43 @@ OBDLevelControl/
 ├── README.md
 └── OBDLevel/
     ├── OBDLevelApp.swift                  @main, wires transport + service + demo
+    ├── Assets.xcassets/
+    │   └── AppIcon.appiconset/            1024×1024 icon, no alpha
     ├── Transport/
     │   ├── OBDelevenTransport.swift       BLE, 20-byte chunking, frame parser,
+    │   │                                  wire codec (XOR + CRC + escaping),
     │   │                                  command gate, generation, timeouts, logging
     │   └── ECUConnection.swift            UDS: session, DID read, routines,
     │                                      NRC retry, security access
     ├── Vehicle/
     │   ├── LevelControlService.swift      profile persistence, channel decode,
-    │   │                                  roles, actions, DID/RID scanners
+    │   │                                  roles, actions, auto scan, stop handling
+    │   ├── AutoConfig.swift               scaling guesses + plausibility bands
     │   └── DemoModel.swift                HTML mockup simulation, nothing on the wire
     └── UI/
         ├── Theme.swift                    palette, cards, hex fields, buttons
         ├── ContentView.swift              header, tab bar, adapter sheet
-        ├── OverviewView.swift             wheel heights, level control, venting
-        ├── SystemView.swift               pressure, temperature, reservoir
+        ├── OverviewView.swift             wheel heights, höj/sänk, level control, venting
+        ├── SystemView.swift               battery, pressure, temperature, reservoir
         ├── DiagnosticsView.swift          link info, sensors, console, log
-        └── SettingsView.swift             car, mapping, channels, routines, scans, demo
+        └── SettingsView.swift             car, autoconfig, mapping, channels, routines, scans, demo
 ```
 
 Key types:
 
 | Type | Role |
 |---|---|
-| `OBDelevenTransport` | owns the `CBCentralManager`, builds frames, serialises commands, parses replies |
+| `OBDelevenTransport` | owns the `CBCentralManager`, encodes/decodes the wire format, serialises commands, parses replies |
 | `DeviceProtocol` | transport selector (`20 xx`) |
 | `OBDError` / `NRC` | error + negative-response decoding |
-| `ECUConnection` | UDS layer, one instance per ECU address pair |
+| `ECUConnection` | UDS layer, one instance per ECU address pair; `runRoutine` can be aborted |
 | `HeightChannel` | DID + decoding recipe + unit |
 | `RoutineAction` | RID + parameters + role |
-| `ActionRole` | which button a routine is wired to |
+| `ActionRole` | which button a routine is wired to (ten roles) |
 | `LevelControlService` | observable state for the UI, persists profile in `UserDefaults` |
-| `DemoModel` | simulated heights, pressure, temperature and compressor for demo mode |
+| `ValueProbe` / `ValueCandidate` | every plausible reading of a DID response, ranked |
+| `AutoSettings` | DID/RID search ranges, stored separately from the profile |
+| `DemoModel` | simulated heights, pressure, temperature, battery and compressor |
 | `Palette` | the mockup's colours, in one place |
 
 ---
@@ -593,6 +666,7 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | Android class | What it established |
 |---|---|
 | `utils.bluetooth.LeBluetoothDevice` | BLE path: service `FFE0`/char `FFE1`, 20-byte buffer, `writeValue` |
+| `utils.bluetooth.n` (`DeviceBase`) | wire codec: random key `\|0x80`, XOR with right-rotating key, CRC-16/XMODEM, `0F`/`04` + `05` escaping |
 | `utils.bluetooth.ClassicBluetoothDevice` (`g`) | 1st gen is RFCOMM SPP, not BLE |
 | `com.obdeleven.service.core.d` (`Command`) | 5 s timeout, single global command chain |
 | `com.obdeleven.service.core.gen1.i` (`RequestCommand`) | `21 <lenLo> <lenHi> <payload>` framing, response `21 <err> <len> <data>` |

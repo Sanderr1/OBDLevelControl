@@ -17,6 +17,7 @@ struct SettingsView: View {
         VStack(spacing: 18) {
             vehicleSection
             connectionSection
+            autoSection
             mappingSection
             channelSection
             routineSection
@@ -106,6 +107,112 @@ struct SettingsView: View {
                          valueColor: transport.ready ? Palette.green : Palette.muted)
             }
         }
+    }
+
+    // MARK: Automatic id search
+
+    private var autoSection: some View {
+        VStack(spacing: 10) {
+            SectionHeading(title: "Autokonfigurering",
+                           trailing: service.autoProgress.isEmpty ? nil : service.autoProgress)
+
+            Card {
+                SwitchRow(title: "Kör vid anslutning",
+                          detail: "Fyller tomma DID/RID första gången bilen ansluts.",
+                          isOn: $service.autoSettings.onConnect)
+                HairLine()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    FieldCaption(text: "DID — 22 <did>, intervall")
+
+                    HStack(spacing: 8) {
+                        HexField(label: "FRÅN",
+                                 value: $service.autoSettings.didStart.adapted(get: { UInt32($0) },
+                                                                              set: { UInt16(truncatingIfNeeded: $0) }),
+                                 digits: 4)
+                        FieldBox {
+                            VStack(alignment: .leading, spacing: 2) {
+                                FieldCaption(text: "ANTAL")
+                                Picker("", selection: $service.autoSettings.didCount) {
+                                    ForEach([64, 128, 256, 512, 1024, 2048], id: \.self) {
+                                        Text("\($0)").tag($0)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .tint(Palette.ink)
+                            }
+                        }
+                    }
+
+                    ActionButton(title: "Hitta värden", enabled: scanEnabled) {
+                        Task {
+                            await service.autoFindValues(from: service.autoSettings.didStart,
+                                                         count: service.autoSettings.didCount)
+                        }
+                    }
+                }
+                .padding(11)
+
+                HairLine()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    FieldCaption(text: "RID — 31 03 <rid>, intervall")
+
+                    HStack(spacing: 8) {
+                        HexField(label: "FRÅN",
+                                 value: $service.autoSettings.ridStart.adapted(get: { UInt32($0) },
+                                                                              set: { UInt16(truncatingIfNeeded: $0) }),
+                                 digits: 4)
+                        FieldBox {
+                            VStack(alignment: .leading, spacing: 2) {
+                                FieldCaption(text: "ANTAL")
+                                Picker("", selection: $service.autoSettings.ridCount) {
+                                    ForEach([64, 128, 256, 512, 1024], id: \.self) {
+                                        Text("\($0)").tag($0)
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .tint(Palette.ink)
+                            }
+                        }
+                    }
+
+                    ActionButton(title: "Hitta rutiner", enabled: scanEnabled) {
+                        Task {
+                            await service.autoFindRoutines(from: service.autoSettings.ridStart,
+                                                           count: service.autoSettings.ridCount)
+                        }
+                    }
+                }
+                .padding(11)
+
+                HairLine()
+
+                HStack(spacing: 8) {
+                    ActionButton(title: "Allt automatiskt", enabled: scanEnabled) {
+                        Task { await service.autoConfigure() }
+                    }
+                }
+                .padding(11)
+
+                HairLine()
+
+                Text(autoDetail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private var autoDetail: String {
+        if !service.autoProgress.isEmpty { return "Söker " + service.autoProgress }
+        if !service.statusLine.isEmpty { return service.statusLine }
+        return "Läser DIDs och tolkar svaret som spänning, tryck, temperatur eller höjd. Rutiner hittas med 31 03, vilket bara läser — inget startas i bilen."
     }
 
     // MARK: Role mapping

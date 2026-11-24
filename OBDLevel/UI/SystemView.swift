@@ -11,9 +11,82 @@ struct SystemView: View {
 
     var body: some View {
         VStack(spacing: 18) {
+            batterySection
             systemSection
             reservoirSection
         }
+    }
+
+    // MARK: Battery
+
+    private var batterySection: some View {
+        VStack(spacing: 10) {
+            SectionHeading(title: "Batteri", trailing: demo.enabled ? "Simulerat" : "Live")
+
+            Card {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(batteryText)
+                        .font(.system(size: 34, weight: .semibold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(batteryColor)
+                    Text("V")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                    Spacer(minLength: 8)
+                    Text(batteryState)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(batteryColor)
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 12)
+
+                HairLine()
+
+                Text(batteryDetail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private var batteryValue: Double? {
+        if demo.enabled { return demo.showValues ? demo.battery : nil }
+        return service.batteryReading?.value
+    }
+
+    private var batteryText: String {
+        formatValue(batteryValue, decimals: 1)
+    }
+
+    private var batteryColor: Color {
+        guard let value = batteryValue else { return Palette.muted }
+        if value >= 12.4 { return Palette.green }
+        if value >= 11.8 { return Palette.amber }
+        return Color(rgb: 0xFF8A8A)
+    }
+
+    private var batteryState: String {
+        guard let value = batteryValue else { return "—" }
+        if value >= 12.4 { return "God" }
+        if value >= 11.8 { return "Låg" }
+        return "Kritisk låg"
+    }
+
+    private var batteryDetail: String {
+        if demo.enabled {
+            return demo.compressorRunning
+                ? "Simuleras sjunka medan kompressorn går."
+                : "Simulerat värde. Ingen BLE-trafik."
+        }
+        guard let channel = service.batteryChannel else {
+            return "Ingen batterikanal i profilen."
+        }
+        if channel.did == 0 {
+            return "DID saknas. Kör Autokonfigurering eller fyll i DID under Inställningar → Höjdkanaler."
+        }
+        return String(format: "DID %04X · %d byte · skala %g V", channel.did, channel.length, channel.scale)
     }
 
     // MARK: System values
@@ -43,18 +116,19 @@ struct SystemView: View {
     }
 
     private func channelText(_ channel: HeightChannel) -> String {
-        guard let index = service.systemChannels.firstIndex(where: { $0.id == channel.id }) else {
+        guard let channelIndex = service.profile.channels.firstIndex(where: { $0.id == channel.id }) else {
             return "–"
         }
         if demo.enabled {
             guard demo.showValues else { return "–" }
-            if index == 0 { return formatValue(demo.pressure, decimals: 1) }
-            if index == 1 { return "\(demo.temperature)" }
-            return "–"
+            switch service.systemChannels.firstIndex(where: { $0.id == channel.id }) {
+            case 0?: return formatValue(demo.pressure, decimals: 1)
+            case 1?: return "\(demo.temperature)"
+            default: return "–"
+            }
         }
-        let readingIndex = 4 + index
-        guard readingIndex < service.readings.count else { return "–" }
-        return formatValue(service.readings[readingIndex].value, decimals: 1)
+        guard channelIndex < service.readings.count else { return "–" }
+        return formatValue(service.readings[channelIndex].value, decimals: 1)
     }
 
     // MARK: Reservoir

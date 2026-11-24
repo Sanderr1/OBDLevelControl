@@ -19,6 +19,7 @@ final class DemoModel: ObservableObject {
     @Published var activeReservoir: ActionRole?
     @Published var pressureTenths = 82
     @Published var temperature = 36
+    @Published var batteryTenths = 124
     @Published var compressorRunning = false
     @Published var ventStatus = DemoModel.idleVent
     @Published var reservoirStatus = "Välj fyllning eller luftning."
@@ -36,6 +37,7 @@ final class DemoModel: ObservableObject {
     }
 
     var pressure: Double { Double(pressureTenths) / 10 }
+    var battery: Double { Double(batteryTenths) / 10 }
 
     // MARK: Mode
 
@@ -84,6 +86,18 @@ final class DemoModel: ObservableObject {
         }
     }
 
+    // MARK: Raise / lower
+
+    func lift(_ axle: Axle, up: Bool) {
+        guard activeVent == nil else { return }
+        let step: Double = up ? 10 : -10
+        switch axle {
+        case .front: offsetFront = min(max(offsetFront + step, -40), 40)
+        case .rear: offsetRear = min(max(offsetRear + step, -40), 40)
+        }
+        ventStatus = up ? "Höjer \(axle.title) i demot." : "Sänker \(axle.title) i demot."
+    }
+
     // MARK: Reservoir
 
     func reservoir(_ action: ActionRole) {
@@ -110,6 +124,7 @@ final class DemoModel: ObservableObject {
                 if filling {
                     self.pressureTenths = min(self.pressureTenths + 4, target)
                     self.temperature = min(self.temperature + 1, 65)
+                    self.batteryTenths = max(self.batteryTenths - 1, 118)
                 } else {
                     self.pressureTenths = max(self.pressureTenths - 4, target)
                 }
@@ -135,6 +150,7 @@ final class DemoModel: ObservableObject {
         showValues = true
         pressureTenths = 82
         temperature = 36
+        batteryTenths = 124
         ventStatus = Self.idleVent
         reservoirStatus = "Välj fyllning eller luftning."
         settingsStatus = "Demot är återställt."

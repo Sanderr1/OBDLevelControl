@@ -80,6 +80,7 @@ final class ECUConnection {
                     parameters: [UInt8] = [],
                     pollInterval: TimeInterval = 0.4,
                     maxSeconds: Double = 90,
+                    shouldStop: (() -> Bool)? = nil,
                     progress: ((String) -> Void)? = nil) async throws -> [UInt8] {
 
         _ = try await startRoutine(rid, parameters: parameters)
@@ -90,6 +91,12 @@ final class ECUConnection {
 
         while Date() < deadline {
             try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+
+            if shouldStop?() == true {
+                _ = try? await stopRoutine(rid)
+                progress?("stopped")
+                throw CancellationError()
+            }
             do {
                 last = try await routineResults(rid)
             } catch OBDError.nrc(let code) where code == 0x23 || code == 0x21 {

@@ -28,6 +28,7 @@ enum Axle: String, Hashable {
     case rear
 
     var title: String { self == .front ? "fram" : "bak" }
+    var heading: String { self == .front ? "Fram" : "Bak" }
 }
 
 enum VentTarget: String, CaseIterable, Hashable {
@@ -63,6 +64,10 @@ enum VentTarget: String, CaseIterable, Hashable {
 /// What a routine does. The interface maps buttons to routines through these roles,
 /// so the same RID list works no matter what the ODX pack calls them.
 enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
+    case raiseFront
+    case lowerFront
+    case raiseRear
+    case lowerRear
     case ventFront
     case ventRear
     case levelOff
@@ -74,6 +79,10 @@ enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
+        case .raiseFront: return "Höj fram"
+        case .lowerFront: return "Sänk fram"
+        case .raiseRear: return "Höj bak"
+        case .lowerRear: return "Sänk bak"
         case .ventFront: return "Vent fram"
         case .ventRear: return "Vent bak"
         case .levelOff: return "Nivåreglering av"
@@ -134,29 +143,51 @@ struct LevelProfile: Codable {
     var rxId: UInt32
     var channels: [HeightChannel]
     var actions: [RoutineAction]
+    /// Which channel shows the battery voltage. Optional so older profiles still decode.
+    var battery: UUID?
 
-    static let blank = LevelProfile(
-        name: "Min bil",
-        vehicle: "Luftfjädring · UDS",
-        txId: 0x714,
-        rxId: 0x77E,
-        channels: [
-            HeightChannel(name: "Vänster fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-            HeightChannel(name: "Höger fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-            HeightChannel(name: "Vänster bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-            HeightChannel(name: "Höger bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-            HeightChannel(name: "Systemtryck", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: false, unit: "bar"),
-            HeightChannel(name: "Kompressortemperatur", did: 0x0000, length: 1, scale: 1, offset: 0, signed: false, unit: "°C")
-        ],
-        actions: [
-            RoutineAction(name: "Vent fram", rid: 0x0000, parameters: [], role: .ventFront),
-            RoutineAction(name: "Vent bak", rid: 0x0000, parameters: [], role: .ventRear),
-            RoutineAction(name: "Nivåreglering av", rid: 0x0000, parameters: [], role: .levelOff),
-            RoutineAction(name: "Nivåreglering på", rid: 0x0000, parameters: [], role: .levelOn),
-            RoutineAction(name: "Fyll behållare", rid: 0x0000, parameters: [], role: .reservoirFill),
-            RoutineAction(name: "Lufta behållare", rid: 0x0000, parameters: [], role: .reservoirVent)
-        ]
-    )
+    static var blank: LevelProfile {
+        let battery = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
+                                    scale: 0.001, offset: 0, signed: false, unit: "V")
+        return LevelProfile(
+            name: "Min bil",
+            vehicle: "Luftfjädring · UDS",
+            txId: 0x714,
+            rxId: 0x77E,
+            channels: [
+                HeightChannel(name: "Vänster fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
+                HeightChannel(name: "Höger fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
+                HeightChannel(name: "Vänster bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
+                HeightChannel(name: "Höger bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
+                HeightChannel(name: "Systemtryck", did: 0x0000, length: 2, scale: 0.01, offset: 0, signed: false, unit: "bar"),
+                HeightChannel(name: "Kompressortemperatur", did: 0x0000, length: 1, scale: 1, offset: 0, signed: false, unit: "°C"),
+                battery
+            ],
+            actions: [
+                RoutineAction(name: "Höj fram", rid: 0x0000, parameters: [], role: .raiseFront),
+                RoutineAction(name: "Sänk fram", rid: 0x0000, parameters: [], role: .lowerFront),
+                RoutineAction(name: "Höj bak", rid: 0x0000, parameters: [], role: .raiseRear),
+                RoutineAction(name: "Sänk bak", rid: 0x0000, parameters: [], role: .lowerRear),
+                RoutineAction(name: "Vent fram", rid: 0x0000, parameters: [], role: .ventFront),
+                RoutineAction(name: "Vent bak", rid: 0x0000, parameters: [], role: .ventRear),
+                RoutineAction(name: "Nivåreglering av", rid: 0x0000, parameters: [], role: .levelOff),
+                RoutineAction(name: "Nivåreglering på", rid: 0x0000, parameters: [], role: .levelOn),
+                RoutineAction(name: "Fyll behållare", rid: 0x0000, parameters: [], role: .reservoirFill),
+                RoutineAction(name: "Lufta behållare", rid: 0x0000, parameters: [], role: .reservoirVent)
+            ],
+            battery: battery.id
+        )
+    }
+}
+
+/// Ranges used by the automatic id search. Stored separately from the profile so
+/// adding fields here can never break an older saved profile.
+struct AutoSettings: Codable {
+    var didStart: UInt16 = 0x0000
+    var didCount: Int = 256
+    var ridStart: UInt16 = 0x0000
+    var ridCount: Int = 256
+    var onConnect = true
 }
 
 struct HeightReading: Identifiable {
@@ -179,13 +210,24 @@ final class LevelControlService: ObservableObject {
     @Published var statusLine = ""
     @Published var discoveredDIDs: [String] = []
     @Published var discoveredRoutines: [String] = []
+    @Published var autoSettings: AutoSettings {
+        didSet { persistAuto() }
+    }
+    /// Progress of a running automatic id search, e.g. "0A31  (412/1024)".
+    @Published var autoProgress = ""
     /// The app's own belief about level control. The ECU is not read for this.
     @Published var levelControlEnabled = true
+    /// Last routine started, so "Stoppa" knows what to abort.
+    @Published private(set) var lastAction: RoutineAction?
+    /// True only while a routine is actually being started/polled.
+    @Published private(set) var canStop = false
 
     let transport: OBDelevenTransport
     let ecu: ECUConnection
 
     private let storeKey = "level.profile.v1"
+    private let autoKey = "level.auto.v1"
+    private var stopRequested = false
 
     init(transport: OBDelevenTransport) {
         self.transport = transport
@@ -197,33 +239,52 @@ final class LevelControlService: ObservableObject {
         } else {
             profile = .blank
         }
+        if let data = UserDefaults.standard.data(forKey: autoKey),
+           let saved = try? JSONDecoder().decode(AutoSettings.self, from: data) {
+            autoSettings = saved
+        } else {
+            autoSettings = AutoSettings()
+        }
         Self.migrate(&profile)
         readings = profile.channels.map {
             HeightReading(name: $0.name, did: $0.did, value: nil, raw: "–")
         }
     }
 
-    /// Older profiles stored channels without units and routines without roles.
-    /// Roles used to be implied by the routine name, so bake that in once.
+    /// Older profiles stored channels without units, routines without roles and had no
+    /// battery channel. Roles used to be implied by the routine name, so bake that in once.
     private static func migrate(_ profile: inout LevelProfile) {
-        // Only legacy profiles (created before roles existed) have no roles at all.
-        guard profile.actions.allSatisfy({ $0.role == nil }) else { return }
-        for i in profile.actions.indices {
-            let name = profile.actions[i].name.lowercased()
-            if name.contains("vent") && name.contains("front") {
-                profile.actions[i].role = .ventFront
-            } else if name.contains("vent") && name.contains("rear") {
-                profile.actions[i].role = .ventRear
-            } else if name.contains("level") && name.hasSuffix("off") {
-                profile.actions[i].role = .levelOff
-            } else if name.contains("level") && name.hasSuffix("on") {
-                profile.actions[i].role = .levelOn
-            } else if name.contains("fill") {
-                profile.actions[i].role = .reservoirFill
-            } else if name.contains("vent") && name.contains("reservoir") {
-                profile.actions[i].role = .reservoirVent
+        if profile.actions.allSatisfy({ $0.role == nil }) {
+            for i in profile.actions.indices {
+                let name = profile.actions[i].name.lowercased()
+                if name.contains("vent") && name.contains("front") {
+                    profile.actions[i].role = .ventFront
+                } else if name.contains("vent") && name.contains("rear") {
+                    profile.actions[i].role = .ventRear
+                } else if name.contains("level") && name.hasSuffix("off") {
+                    profile.actions[i].role = .levelOff
+                } else if name.contains("level") && name.hasSuffix("on") {
+                    profile.actions[i].role = .levelOn
+                } else if name.contains("fill") {
+                    profile.actions[i].role = .reservoirFill
+                } else if name.contains("vent") && name.contains("reservoir") {
+                    profile.actions[i].role = .reservoirVent
+                }
             }
         }
+
+        // Every profile gets exactly one battery channel, once.
+        if let id = profile.battery, profile.channels.contains(where: { $0.id == id }) { return }
+        if let existing = profile.channels.first(where: {
+            ($0.unit ?? "").uppercased() == "V" || $0.name.lowercased().contains("batteri")
+        }) {
+            profile.battery = existing.id
+            return
+        }
+        let channel = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
+                                    scale: 0.001, offset: 0, signed: false, unit: "V")
+        profile.channels.append(channel)
+        profile.battery = channel.id
     }
 
     private func persist() {
@@ -231,15 +292,28 @@ final class LevelControlService: ObservableObject {
         UserDefaults.standard.set(data, forKey: storeKey)
     }
 
+    private func persistAuto() {
+        guard let data = try? JSONEncoder().encode(autoSettings) else { return }
+        UserDefaults.standard.set(data, forKey: autoKey)
+    }
+
     // MARK: Connection
 
     func connectECU() async {
-        await run("connecting") {
+        let ok = await run("kopplar upp") {
             self.ecu.txId = self.profile.txId
             self.ecu.rxId = self.profile.rxId
             try await self.ecu.open()
-            self.statusLine = "ECU open"
+            self.statusLine = "Styrenhet öppen"
         }
+        guard ok, autoSettings.onConnect, needsAutoConfig else { return }
+        await autoConfigure()
+    }
+
+    /// True while any channel still lacks a DID or any routine lacks a RID.
+    /// Used to avoid re-scanning an already configured car on every connect.
+    var needsAutoConfig: Bool {
+        profile.channels.contains { $0.did == 0 } || profile.actions.contains { $0.rid == 0 }
     }
 
     // MARK: Self test
@@ -269,6 +343,153 @@ final class LevelControlService: ObservableObject {
             }
             self.statusLine = lines.joined(separator: " · ")
         }
+    }
+
+    // MARK: Automatic configuration
+
+    /// One tap: find DIDs that decode to plausible values, then find implemented routines.
+    func autoConfigure() async {
+        await autoFindValues(from: autoSettings.didStart, count: autoSettings.didCount)
+        await autoFindRoutines(from: autoSettings.ridStart, count: autoSettings.ridCount)
+    }
+
+    /// Reads every DID in the range and keeps the ones that decode to something physical.
+    /// The scaling table is in AutoConfig.swift; the ranges are a search shortcut, since
+    /// the real map lives in the ODX pack and not in this app.
+    func autoFindValues(from start: UInt16, count: Int) async {
+        await run("letar värden") {
+            self.discoveredDIDs.removeAll()
+            var found: [ValueCandidate] = []
+            for i in 0..<count {
+                let did = start &+ UInt16(i)
+                self.autoProgress = String(format: "%04X  (%d/%d)", did, i + 1, count)
+                if let data = try? await self.ecu.readDID(did), !data.isEmpty {
+                    self.discoveredDIDs.append(String(format: "%04X: %@", did, data.hex))
+                    if self.discoveredDIDs.count > 300 {
+                        self.discoveredDIDs.removeFirst(self.discoveredDIDs.count - 300)
+                    }
+                    found.append(contentsOf: ValueProbe.candidates(did: did, data: data))
+                }
+                if i % 8 == 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
+            }
+            self.autoProgress = ""
+            self.apply(ValueProbe.bestPerDID(found))
+        }
+    }
+
+    /// `31 03` only — never `31 01`. Asking for results is read-only, so this cannot
+    /// start anything in the car. Every RID that answers becomes a row in the routine list.
+    func autoFindRoutines(from start: UInt16, count: Int) async {
+        await run("letar rutiner") {
+            self.discoveredRoutines.removeAll()
+            var newActions: [RoutineAction] = []
+            for i in 0..<count {
+                let rid = start &+ UInt16(i)
+                self.autoProgress = String(format: "%04X  (%d/%d)", rid, i + 1, count)
+                if let response = try? await self.ecu.routineResults(rid), !response.isEmpty {
+                    self.discoveredRoutines.append(String(format: "%04X: %@", rid, response.hex))
+                    if self.discoveredRoutines.count > 300 {
+                        self.discoveredRoutines.removeFirst(self.discoveredRoutines.count - 300)
+                    }
+                    let known = self.profile.actions.contains { $0.rid == rid }
+                        || newActions.contains { $0.rid == rid }
+                    if !known, newActions.count < 40 {
+                        newActions.append(RoutineAction(name: String(format: "RID %04X", rid),
+                                                        rid: rid,
+                                                        parameters: [],
+                                                        role: nil))
+                    }
+                }
+                if i % 8 == 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
+            }
+            self.autoProgress = ""
+            if !newActions.isEmpty {
+                self.profile.actions.append(contentsOf: newActions)
+            }
+            self.statusLine = newActions.isEmpty
+                ? "Hittade \(self.discoveredRoutines.count) rutiner, inga nya att mappa"
+                : "Hittade \(self.discoveredRoutines.count) rutiner, la till \(newActions.count) i mappningen"
+        }
+    }
+
+    /// Fills empty channels with the best candidates and reports what it did.
+    private func apply(_ candidates: [ValueCandidate]) {
+        guard !candidates.isEmpty else {
+            statusLine = "Hittade inga värden i intervallet"
+            return
+        }
+
+        var updated = profile
+        var used: Set<UInt16> = []
+        var lines: [String] = []
+
+        func take(_ kind: ValueKind) -> ValueCandidate? {
+            let match = candidates
+                .filter { $0.kind == kind && !used.contains($0.did) }
+                .max { ValueProbe.confidence($0) < ValueProbe.confidence($1) }
+            if let match { used.insert(match.did) }
+            return match
+        }
+
+        let batteryID = updated.battery
+        if let battery = take(.voltage),
+           let index = updated.channels.firstIndex(where: { $0.id == batteryID }) {
+            updated.channels[index].did = battery.did
+            updated.channels[index].length = battery.length
+            updated.channels[index].scale = battery.scale
+            updated.channels[index].signed = battery.signed
+            updated.channels[index].offset = 0
+            lines.append(String(format: "batteri %04X = %.1f V", battery.did, battery.value))
+        }
+
+        if let pressure = take(.pressure),
+           let index = updated.channels.firstIndex(where: {
+               ($0.unit ?? "").lowercased() == "bar" && $0.did == 0
+           }) {
+            updated.channels[index].did = pressure.did
+            updated.channels[index].length = pressure.length
+            updated.channels[index].scale = pressure.scale
+            updated.channels[index].signed = pressure.signed
+            updated.channels[index].offset = 0
+            lines.append(String(format: "tryck %04X = %.2f bar", pressure.did, pressure.value))
+        }
+
+        if let temperature = take(.temperature),
+           let index = updated.channels.firstIndex(where: {
+               ($0.unit ?? "").uppercased().contains("C") && $0.did == 0
+           }) {
+            updated.channels[index].did = temperature.did
+            updated.channels[index].length = temperature.length
+            updated.channels[index].scale = temperature.scale
+            updated.channels[index].signed = temperature.signed
+            updated.channels[index].offset = 0
+            lines.append(String(format: "temp %04X = %.0f °C", temperature.did, temperature.value))
+        }
+
+        let heights = candidates
+            .filter { $0.kind == .distance && !used.contains($0.did)
+                && $0.value >= 280 && $0.value <= 480 }
+            .sorted { $0.did < $1.did }
+            .prefix(4)
+
+        for (slot, candidate) in zip(WheelSlot.allCases, heights) {
+            let index = slot.rawValue
+            guard index < updated.channels.count else { break }
+            updated.channels[index].did = candidate.did
+            updated.channels[index].length = candidate.length
+            updated.channels[index].scale = candidate.scale
+            updated.channels[index].signed = candidate.signed
+            updated.channels[index].offset = 0
+            lines.append(String(format: "%@ %04X = %.0f mm", slot.title, candidate.did, candidate.value))
+        }
+
+        guard !lines.isEmpty else {
+            statusLine = "Hittade \(candidates.count) tolkningar men ingen tom kanal att fylla"
+            return
+        }
+        profile = updated
+        rebuildReadings()
+        statusLine = "Auto: " + lines.joined(separator: " · ")
     }
 
     // MARK: Heights
@@ -304,7 +525,25 @@ final class LevelControlService: ObservableObject {
     // MARK: Channel and routine helpers
 
     var wheelChannels: [HeightChannel] { Array(profile.channels.prefix(4)) }
-    var systemChannels: [HeightChannel] { Array(profile.channels.dropFirst(4)) }
+
+    var batteryChannel: HeightChannel? {
+        if let id = profile.battery,
+           let channel = profile.channels.first(where: { $0.id == id }) { return channel }
+        return profile.channels.first { ($0.unit ?? "").uppercased() == "V" }
+    }
+
+    var batteryReading: HeightReading? {
+        guard let id = profile.battery,
+              let index = profile.channels.firstIndex(where: { $0.id == id }),
+              index < readings.count else { return nil }
+        return readings[index]
+    }
+
+    /// Everything after the fourth channel except the battery, which has its own card.
+    var systemChannels: [HeightChannel] {
+        let batteryID = batteryChannel?.id
+        return profile.channels.dropFirst(4).filter { $0.id != batteryID }
+    }
 
     func action(for role: ActionRole) -> RoutineAction? {
         profile.actions.first { $0.role == role }
@@ -357,13 +596,25 @@ final class LevelControlService: ObservableObject {
             statusLine = "\(action.name): RID saknas i Inställningar"
             return false
         }
+        lastAction = action
+        stopRequested = false
+        canStop = true
+        defer { canStop = false }
         return await run(action.name) {
             let result = try await self.ecu.runRoutine(action.rid,
-                                                       parameters: action.parameters) { msg in
+                                                       parameters: action.parameters,
+                                                       shouldStop: { self.stopRequested }) { msg in
                 self.statusLine = "\(action.name): \(msg)"
             }
             self.statusLine = "\(action.name): klar \(result.hex)"
         }
+    }
+
+    /// Asks a running routine to stop. The next 31 03 poll is replaced by 31 02.
+    func requestStop() {
+        guard canStop else { return }
+        stopRequested = true
+        statusLine = "Stoppar …"
     }
 
     func stopAction(_ action: RoutineAction) async {
@@ -462,20 +713,7 @@ final class LevelControlService: ObservableObject {
     }
 
     func scanRoutines(from start: UInt16, count: Int) async {
-        await run("scanning routines") {
-            self.discoveredRoutines.removeAll()
-            for i in 0..<count {
-                let rid = start &+ UInt16(i)
-                do {
-                    let response = try await self.ecu.routineResults(rid)
-                    self.discoveredRoutines.append(String(format: "%04X: %@", rid, response.hex))
-                } catch {
-                    continue
-                }
-                if i % 8 == 0 { try? await Task.sleep(nanoseconds: 40_000_000) }
-            }
-            self.statusLine = "\(self.discoveredRoutines.count) routines responded"
-        }
+        await autoFindRoutines(from: start, count: count)
     }
 
     // MARK: Plumbing
@@ -492,6 +730,9 @@ final class LevelControlService: ObservableObject {
         do {
             try await body()
             return true
+        } catch is CancellationError {
+            statusLine = "\(label): stoppad"
+            return false
         } catch {
             statusLine = "\(label): \(error.localizedDescription)"
             return false

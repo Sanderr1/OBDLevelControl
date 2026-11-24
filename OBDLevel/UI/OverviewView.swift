@@ -18,6 +18,7 @@ struct OverviewView: View {
     var body: some View {
         VStack(spacing: 18) {
             heightsSection
+            rideSection
             controlsSection
         }
         .onReceive(ticker) { _ in
@@ -87,6 +88,87 @@ struct OverviewView: View {
 
     private var canRead: Bool {
         !demo.enabled && transport.ready && !service.busy
+    }
+
+    // MARK: Quick raise / lower
+
+    private var rideSection: some View {
+        VStack(spacing: 10) {
+            SectionHeading(title: "Höj & sänk", trailing: demo.enabled ? "Simulering" : "Live")
+
+            Card {
+                ForEach([Axle.front, Axle.rear], id: \.self) { axle in
+                    if axle == .rear { HairLine() }
+                    HStack(spacing: 8) {
+                        Text(axle.heading)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                            .frame(width: 46, alignment: .leading)
+
+                        ActionButton(title: "Höj", enabled: rideEnabled(axle, up: true)) {
+                            ride(axle, up: true)
+                        }
+                        ActionButton(title: "Sänk", enabled: rideEnabled(axle, up: false)) {
+                            ride(axle, up: false)
+                        }
+                    }
+                    .padding(11)
+                }
+
+                if service.canStop {
+                    HairLine()
+                    HStack(spacing: 8) {
+                        ActionButton(title: "Stoppa", running: true) {
+                            service.requestStop()
+                        }
+                    }
+                    .padding(11)
+                }
+
+                HairLine()
+                Text(rideStatus)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+
+            if !demo.enabled {
+                Text("Kör den rutin som är mappad under Inställningar → Funktionsmappning. Omappade knappar är avstängda.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 2)
+            }
+        }
+    }
+
+    private func rideRole(_ axle: Axle, up: Bool) -> ActionRole {
+        switch (axle, up) {
+        case (.front, true): return .raiseFront
+        case (.front, false): return .lowerFront
+        case (.rear, true): return .raiseRear
+        case (.rear, false): return .lowerRear
+        }
+    }
+
+    private func rideEnabled(_ axle: Axle, up: Bool) -> Bool {
+        if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+        return !service.busy && service.hasRoutine(rideRole(axle, up: up))
+    }
+
+    private func ride(_ axle: Axle, up: Bool) {
+        if demo.enabled {
+            demo.lift(axle, up: up)
+        } else if let action = service.action(for: rideRole(axle, up: up)) {
+            Task { await service.runAction(action) }
+        }
+    }
+
+    private var rideStatus: String {
+        if demo.enabled { return demo.ventStatus }
+        return service.statusLine.isEmpty ? "Redo." : service.statusLine
     }
 
     // MARK: Controls
