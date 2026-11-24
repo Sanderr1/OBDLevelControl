@@ -4,6 +4,7 @@ import SwiftUI
 struct OBDLevelApp: App {
     @StateObject private var transport: OBDelevenTransport
     @StateObject private var service: LevelControlService
+    @StateObject private var demo = DemoModel()
 
     init() {
         let t = OBDelevenTransport()
@@ -16,6 +17,7 @@ struct OBDLevelApp: App {
             ContentView()
                 .environmentObject(transport)
                 .environmentObject(service)
+                .environmentObject(demo)
         }
     }
 }

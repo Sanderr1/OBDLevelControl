@@ -1,362 +1,319 @@
 import SwiftUI
 
-struct ContentView: View {
-    @EnvironmentObject var transport: OBDelevenTransport
-    @EnvironmentObject var service: LevelControlService
+enum AppTab: String, CaseIterable, Identifiable {
+    case overview
+    case system
+    case diagnostics
+    case settings
 
-    var body: some View {
-        TabView {
-            ConnectView()
-                .tabItem { Label("Link", systemImage: "dot.radiowaves.left.and.right") }
-            HeightsView()
-                .tabItem { Label("Heights", systemImage: "arrow.up.and.down") }
-            ActionsView()
-                .tabItem { Label("Actions", systemImage: "wrench.and.screwdriver") }
-            ConfigView()
-                .tabItem { Label("Config", systemImage: "slider.horizontal.3") }
-            ConsoleView()
-                .tabItem { Label("Console", systemImage: "terminal") }
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: return "Översikt"
+        case .system: return "System"
+        case .diagnostics: return "Diagnostik"
+        case .settings: return "Inställningar"
         }
     }
 }
 
-// MARK: - Link
-
-struct ConnectView: View {
+struct ContentView: View {
     @EnvironmentObject var transport: OBDelevenTransport
     @EnvironmentObject var service: LevelControlService
+    @EnvironmentObject var demo: DemoModel
+
+    @State private var tab: AppTab = .overview
+    @State private var showLink = false
+
+    var body: some View {
+        ZStack {
+            Palette.bg.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                AppHeader(showLink: $showLink)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 6)
+
+                TabSwitcher(selection: $tab)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, 12)
+
+                ScrollView {
+                    VStack(spacing: 18) {
+                        switch tab {
+                        case .overview:
+                            OverviewView()
+                        case .system:
+                            SystemView()
+                        case .diagnostics:
+                            DiagnosticsView()
+                        case .settings:
+                            SettingsView(showLink: $showLink)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 28)
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showLink) {
+            LinkSheet()
+                .environmentObject(transport)
+                .environmentObject(service)
+        }
+    }
+}
+
+// MARK: - Header
+
+struct AppHeader: View {
+    @EnvironmentObject var transport: OBDelevenTransport
+    @EnvironmentObject var service: LevelControlService
+    @EnvironmentObject var demo: DemoModel
+
+    @Binding var showLink: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("OBD Height Controller")
+                        .font(.system(size: 12, weight: .bold))
+                        .tracking(0.6)
+                        .foregroundStyle(Palette.blue)
+
+                    Text(service.profile.name.isEmpty ? "Min bil" : service.profile.name)
+                        .font(.system(size: 32, weight: .bold))
+                        .tracking(-1)
+                        .foregroundStyle(Palette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(service.profile.vehicle ?? "Luftfjädring · UDS")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Palette.muted)
+                }
+
+                Spacer(minLength: 8)
+
+                Text(badgeText)
+                    .font(.system(size: 10, weight: .heavy))
+                    .tracking(0.9)
+                    .foregroundStyle(badgeColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(badgeColor.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(badgeColor.opacity(0.45), lineWidth: 1)
+                    )
+            }
+
+            Button {
+                showLink = true
+            } label: {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 6, height: 6)
+                    Text(stateText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Spacer(minLength: 8)
+                    Text(rightText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.muted)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Palette.line, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 16)
+        }
+    }
+
+    private var badgeText: String {
+        if demo.enabled { return "DEMO" }
+        return transport.ready ? "LIVE" : "OFFLINE"
+    }
+
+    private var badgeColor: Color {
+        if demo.enabled { return Palette.amber }
+        return transport.ready ? Palette.green : Palette.amber
+    }
+
+    private var dotColor: Color {
+        if demo.enabled { return Palette.amber }
+        return transport.ready ? Palette.green : Palette.amber
+    }
+
+    private var stateText: String {
+        if demo.enabled { return "Demoläge" }
+        if transport.ready { return "Ansluten" }
+        return transport.statusText == "scanning" ? "Söker adapter …" : "Ej ansluten"
+    }
+
+    private var rightText: String {
+        if demo.enabled { return "Simulering · ingen BLE" }
+        if let gen = transport.generation {
+            return gen == 3 ? "Pro 3" : "Gen \(gen)"
+        }
+        return transport.ready ? transport.connectedName : "Välj adapter"
+    }
+}
+
+// MARK: - Tabs
+
+struct TabSwitcher: View {
+    @Binding var selection: AppTab
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases) { tab in
+                Button {
+                    selection = tab
+                } label: {
+                    Text(tab.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(selection == tab ? Palette.ink : Palette.muted)
+                        .background(selection == tab ? Palette.tabActive : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(Palette.surfaceAlt)
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Palette.line, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Connection sheet
+
+struct LinkSheet: View {
+    @EnvironmentObject var transport: OBDelevenTransport
+    @EnvironmentObject var service: LevelControlService
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Adapter") {
-                    HStack {
-                        Text(transport.statusText)
-                        Spacer()
-                        Circle()
-                            .fill(transport.ready ? .green : .orange)
-                            .frame(width: 10, height: 10)
-                    }
-                    if let gen = transport.generation {
-                        LabeledContent("Generation", value: gen == 3 ? "3 (Pro 3)" : "\(gen)")
-                    }
-                    if transport.ready {
-                        Button("Disconnect", role: .destructive) { transport.disconnect() }
-                    } else {
-                        Button("Scan") { transport.startScan() }
-                    }
-                }
-
-                if !transport.ready {
-                    Section("Found") {
-                        if transport.devices.isEmpty {
-                            Text("No adapters yet").foregroundStyle(.secondary)
+            ScrollView {
+                VStack(spacing: 14) {
+                    Card {
+                        ValueRow(title: "Status", value: transport.statusText)
+                        HairLine()
+                        ValueRow(title: "Generation", value: generationText)
+                        HairLine()
+                        ValueRow(title: "Adapter", value: transport.ready ? transport.connectedName : "—")
+                        HairLine()
+                        HStack(spacing: 8) {
+                            ActionButton(title: transport.ready ? "Koppla från" : "Skanna") {
+                                if transport.ready { transport.disconnect() } else { transport.startScan() }
+                            }
+                            ActionButton(title: "Öppna styrenhet",
+                                         enabled: transport.ready && !service.busy) {
+                                Task { await service.connectECU() }
+                            }
                         }
-                        ForEach(transport.devices) { device in
-                            Button {
-                                transport.connect(device.id)
-                            } label: {
-                                VStack(alignment: .leading) {
-                                    Text(device.name)
-                                    Text(device.id.uuidString)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                        .padding(11)
+                    }
+
+                    if !transport.ready {
+                        VStack(spacing: 8) {
+                            SectionHeading(title: "Hittade adaptrar", trailing: "\(transport.devices.count)")
+                            Card {
+                                if transport.devices.isEmpty {
+                                    Text("Inga adaptrar ännu. Sätt i adaptern i OBD-uttaget och tryck Skanna.")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Palette.muted)
+                                        .padding(13)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    ForEach(transport.devices) { device in
+                                        if device.id != transport.devices.first?.id { HairLine() }
+                                        Button {
+                                            transport.connect(device.id)
+                                        } label: {
+                                            HStack(spacing: 8) {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(device.name)
+                                                        .font(.system(size: 14, weight: .semibold))
+                                                        .foregroundStyle(Palette.ink)
+                                                    Text(device.id.uuidString)
+                                                        .font(.system(size: 9, design: .monospaced))
+                                                        .foregroundStyle(Palette.muted)
+                                                }
+                                                Spacer(minLength: 8)
+                                                Image(systemName: "chevron.right")
+                                                    .font(.system(size: 12, weight: .semibold))
+                                                    .foregroundStyle(Palette.muted)
+                                            }
+                                            .padding(.horizontal, 13)
+                                            .padding(.vertical, 11)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
                                 }
                             }
                         }
                     }
-                } else {
-                    Section("ECU") {
-                        LabeledContent("TX", value: String(format: "%08X", service.profile.txId))
-                        LabeledContent("RX", value: String(format: "%08X", service.profile.rxId))
-                        Button("Open ECU") {
-                            Task { await service.connectECU() }
-                        }
-                        .disabled(service.busy)
+
+                    Card {
+                        ValueRow(title: "TX", value: String(format: "%08X", service.profile.txId))
+                        HairLine()
+                        ValueRow(title: "RX", value: String(format: "%08X", service.profile.rxId))
+                        HairLine()
+                        Text(service.statusLine.isEmpty ? "Ingen aktivitet." : service.statusLine)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Palette.muted)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 11)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-
-                Section("Status") {
-                    Text(service.statusLine).font(.callout)
-                }
+                .padding(18)
             }
-            .navigationTitle("Link")
-        }
-    }
-}
-
-// MARK: - Heights
-
-struct HeightsView: View {
-    @EnvironmentObject var service: LevelControlService
-    @State private var autoRefresh = false
-    private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Live heights") {
-                    ForEach(service.readings) { reading in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(reading.name)
-                                Text(String(format: "DID %04X", reading.did))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(reading.value.map { String(format: "%.1f", $0) } ?? "—")
-                                    .font(.title3.monospacedDigit())
-                                Text(reading.raw)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                Section {
-                    Toggle("Auto refresh (2 s)", isOn: $autoRefresh)
-                    Button("Read now") {
-                        Task { await service.readHeights() }
-                    }
-                    .disabled(service.busy)
-                }
-
-                Section("Status") {
-                    Text(service.statusLine).font(.callout)
-                }
-            }
-            .navigationTitle("Heights")
-            .onReceive(ticker) { _ in
-                guard autoRefresh, !service.busy else { return }
-                Task { await service.readHeights() }
-            }
-            .task {
-                if service.readings.isEmpty {
-                    await service.readHeights()
+            .background(Palette.bg.ignoresSafeArea())
+            .navigationTitle("Anslutning")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Klar") { dismiss() }
+                        .foregroundStyle(Palette.blue)
                 }
             }
         }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
-}
 
-// MARK: - Actions
-
-struct ActionsView: View {
-    @EnvironmentObject var service: LevelControlService
-    @State private var pending: RoutineAction?
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("Routines") {
-                    ForEach(service.profile.actions) { action in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(action.name)
-                                Text(action.rid == 0
-                                     ? "no routine id"
-                                     : String(format: "RID %04X", action.rid))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Run") {
-                                if action.confirm { pending = action }
-                                else { Task { await service.runAction(action) } }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(service.busy || action.rid == 0)
-                        }
-                    }
-                }
-
-                Section("Stop") {
-                    ForEach(service.profile.actions.filter { $0.rid != 0 }) { action in
-                        Button("Stop \(action.name)") {
-                            Task { await service.stopAction(action) }
-                        }
-                        .disabled(service.busy)
-                    }
-                }
-
-                Section("Status") {
-                    Text(service.statusLine).font(.callout)
-                }
-            }
-            .navigationTitle("Actions")
-            .confirmationDialog("Run \(pending?.name ?? "")?",
-                                isPresented: Binding(get: { pending != nil },
-                                                     set: { if !$0 { pending = nil } })) {
-                Button("Run", role: .destructive) {
-                    if let action = pending {
-                        Task { await service.runAction(action) }
-                    }
-                    pending = nil
-                }
-                Button("Cancel", role: .cancel) { pending = nil }
-            } message: {
-                Text("The car will move. Keep clear of the wheel arches.")
-            }
-        }
-    }
-}
-
-// MARK: - Config
-
-struct ConfigView: View {
-    @EnvironmentObject var service: LevelControlService
-    @State private var txText = ""
-    @State private var rxText = ""
-    @State private var scanStart = "F180"
-    @State private var scanCount = "16"
-    @State private var routineStart = "0000"
-    @State private var routineCount = "64"
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("CAN ids") {
-                    TextField("TX", text: $txText)
-                        .textInputAutocapitalization(.characters)
-                    TextField("RX", text: $rxText)
-                        .textInputAutocapitalization(.characters)
-                    Button("Apply") {
-                        if let tx = UInt32(txText, radix: 16) { service.profile.txId = tx }
-                        if let rx = UInt32(rxText, radix: 16) { service.profile.rxId = rx }
-                    }
-                }
-
-                Section("Height channels") {
-                    ForEach($service.profile.channels) { $channel in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                TextField("Name", text: $channel.name)
-                                TextField("DID", value: $channel.did, format: .number)
-                                    .keyboardType(.asciiCapable)
-                                    .frame(width: 70)
-                            }
-                            HStack(spacing: 12) {
-                                Stepper("len \(channel.length)", value: $channel.length, in: 1...4)
-                                TextField("scale", value: $channel.scale, format: .number)
-                                    .keyboardType(.decimalPad)
-                                Toggle("signed", isOn: $channel.signed)
-                                    .labelsHidden()
-                            }
-                            .font(.caption)
-                        }
-                    }
-                }
-
-                Section("Routine ids") {
-                    ForEach($service.profile.actions) { $action in
-                        HStack {
-                            TextField("Name", text: $action.name)
-                            TextField("RID", value: $action.rid, format: .number)
-                                .frame(width: 80)
-                        }
-                    }
-                }
-
-                Section("Scan DIDs") {
-                    HStack {
-                        TextField("start", text: $scanStart)
-                        TextField("count", text: $scanCount)
-                            .frame(width: 70)
-                        Button("Go") {
-                            guard let start = UInt16(scanStart, radix: 16),
-                                  let count = Int(scanCount) else { return }
-                            Task { await service.scanDIDs(from: start, count: count) }
-                        }
-                        .disabled(service.busy)
-                    }
-                    ForEach(service.discoveredDIDs, id: \.self) { line in
-                        Text(line).font(.system(.caption, design: .monospaced))
-                    }
-                }
-
-                Section("Scan routines (31 03)") {
-                    HStack {
-                        TextField("start", text: $routineStart)
-                        TextField("count", text: $routineCount)
-                            .frame(width: 70)
-                        Button("Go") {
-                            guard let start = UInt16(routineStart, radix: 16),
-                                  let count = Int(routineCount) else { return }
-                            Task { await service.scanRoutines(from: start, count: count) }
-                        }
-                        .disabled(service.busy)
-                    }
-                    ForEach(service.discoveredRoutines, id: \.self) { line in
-                        Text(line).font(.system(.caption, design: .monospaced))
-                    }
-                }
-
-                Section("Reset") {
-                    Button("Restore defaults", role: .destructive) {
-                        service.profile = .blank
-                    }
-                }
-            }
-            .navigationTitle("Config")
-            .onAppear {
-                txText = String(format: "%08X", service.profile.txId)
-                rxText = String(format: "%08X", service.profile.rxId)
-            }
-        }
-    }
-}
-
-// MARK: - Console
-
-struct ConsoleView: View {
-    @EnvironmentObject var transport: OBDelevenTransport
-    @EnvironmentObject var service: LevelControlService
-    @State private var input = "22 F1 90"
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                HStack {
-                    TextField("22 F1 90", text: $input)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                        .font(.system(.body, design: .monospaced))
-                    Button("Send") {
-                        Task { await service.rawCommand(input) }
-                    }
-                    .disabled(service.busy)
-                }
-                .padding()
-
-                Divider()
-
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(transport.log.enumerated()), id: \.offset) { index, line in
-                                Text(line)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .id(index)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                    }
-                    .onChange(of: transport.log.count) { _, count in
-                        proxy.scrollTo(count - 1, anchor: .bottom)
-                    }
-                }
-            }
-            .navigationTitle("Console")
-            .overlay(alignment: .bottom) {
-                Text(service.statusLine)
-                    .font(.caption)
-                    .padding(6)
-                    .background(.thinMaterial)
-            }
+    private var generationText: String {
+        guard let gen = transport.generation else { return transport.ready ? "—" : "Ej ansluten" }
+        switch gen {
+        case 3: return "3 · Pro 3"
+        case 2: return "2 · BLE"
+        case 1: return "1 · Classic SPP"
+        default: return "\(gen)"
         }
     }
 }
