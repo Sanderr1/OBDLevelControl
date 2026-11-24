@@ -100,6 +100,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     private var pendingTimer: Task<Void, Never>?
     private var writeCont: CheckedContinuation<Void, Error>?
 
+    /// Wire-level reassembly (0x0F ... escaped ... 0x04)
+    private var wireBuffer: [UInt8] = []
+    private var wireEscaped = false
+
     private var gateOpen = true
     private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -179,11 +183,100 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         guard ready, let peripheral = active, let ch = dataChar else { throw OBDError.notConnected }
         note("> " + frame.hex)
 
-        try await write(frame, to: peripheral, char: ch)
+        let wire = Self.encode(frame)
+        try await write(wire, to: peripheral, char: ch)
         let response = try await waitResponse(kind: kind, timeout: timeout)
         note("< " + response.hex)
         try? await Task.sleep(nanoseconds: 15_000_000)
         return response
+    }
+
+    // MARK: Wire codec
+
+    /// key rotation used by DeviceBase.a(): ror(key, 1) after every byte
+    private static func rotate(_ key: UInt8) -> UInt8 {
+        UInt8(((UInt16(key) >> 1) | (UInt16(key) << 7)) & 0xFF)
+    }
+
+    /// CRC-16/XMODEM: init 0, poly 0x1021, MSB first.
+    static func crc16(_ bytes: [UInt8]) -> UInt16 {
+        var crc: UInt16 = 0
+        for byte in bytes {
+            for bit in 0..<8 {
+                let dataBit = (byte >> UInt8(7 - bit)) & 1
+                let topBit = UInt8((crc >> 15) & 1)
+                crc = (crc << 1) & 0xFFFF
+                if (dataBit ^ topBit) == 1 { crc ^= 0x1021 }
+            }
+        }
+        return crc
+    }
+
+    /// Plain command bytes -> what actually goes on the air:
+    /// random key byte with bit 7 set, each payload byte XORed with the rotating key,
+    /// CRC16 little-endian, then 0x0F ... 0x05-escaped ... 0x04.
+    static func encode(_ payload: [UInt8]) -> [UInt8] {
+        var key = UInt8.random(in: 0...127) | 0x80
+        var body: [UInt8] = [key]
+        body.reserveCapacity(payload.count + 3)
+        for byte in payload {
+            body.append(byte ^ key)
+            key = rotate(key)
+        }
+
+        let crc = crc16(body)
+        body.append(UInt8(crc & 0xFF))
+        body.append(UInt8(crc >> 8))
+
+        var wire: [UInt8] = [0x0F]
+        wire.reserveCapacity(body.count + 4)
+        for byte in body {
+            if byte == 0x04 || byte == 0x05 || byte == 0x0F { wire.append(0x05) }
+            wire.append(byte)
+        }
+        wire.append(0x04)
+        return wire
+    }
+
+    /// 0x0F ... 0x04 frame -> plain command bytes. CRC is dropped, not verified,
+    /// exactly like DeviceBase.l().
+    static func decode(_ frame: [UInt8]) -> [UInt8] {
+        guard frame.count > 2 else { return [] }
+        let body = Array(frame.dropLast(2))
+        guard let first = body.first else { return [] }
+        guard first & 0x80 != 0 else { return body }
+
+        var key = first
+        var out: [UInt8] = []
+        out.reserveCapacity(body.count - 1)
+        for index in 1..<body.count {
+            out.append(body[index] ^ key)
+            key = rotate(key)
+        }
+        return out
+    }
+
+    private func receive(_ bytes: [UInt8]) {
+        for byte in bytes {
+            if wireEscaped {
+                wireBuffer.append(byte)
+                wireEscaped = false
+            } else if byte == 0x05 {
+                wireEscaped = true
+            } else if byte == 0x04 {
+                let frame = wireBuffer
+                wireBuffer.removeAll(keepingCapacity: true)
+                let payload = Self.decode(frame)
+                if !payload.isEmpty {
+                    rx.append(contentsOf: payload)
+                    drain()
+                }
+            } else if byte == 0x0F {
+                wireBuffer.removeAll(keepingCapacity: true)
+            } else {
+                wireBuffer.append(byte)
+            }
+        }
     }
 
     private func write(_ bytes: [UInt8], to peripheral: CBPeripheral, char: CBCharacteristic) async throws {
@@ -291,6 +384,8 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         generation = nil
         rx.removeAll()
         inbox.removeAll()
+        wireBuffer.removeAll()
+        wireEscaped = false
     }
 }
 
@@ -360,19 +455,31 @@ extension OBDelevenTransport: CBPeripheralDelegate {
         for c in chars where c.uuid == Self.chrData {
             dataChar = c
             peripheral.setNotifyValue(true, for: c)
-            ready = true
-            statusText = "ready"
-            note("connected to \(peripheral.name ?? "adapter")")
-            Task { try? await self.readGeneration() }
+            statusText = "enabling notifications"
         }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        guard characteristic.uuid == Self.chrData else { return }
+        if let error {
+            statusText = "notify failed: \(error.localizedDescription)"
+            return
+        }
+        guard characteristic.isNotifying else { return }
+        dataChar = characteristic
+        ready = true
+        statusText = "ready"
+        note("linked to \(peripheral.name ?? "adapter")")
+        Task { try? await self.readGeneration() }
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
         guard error == nil, let data = characteristic.value else { return }
-        rx.append(contentsOf: [UInt8](data))
-        drain()
+        receive([UInt8](data))
     }
 
     func peripheral(_ peripheral: CBPeripheral,

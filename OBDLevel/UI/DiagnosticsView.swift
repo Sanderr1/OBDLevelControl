@@ -37,6 +37,14 @@ struct DiagnosticsView: View {
                 ValueRow(title: "Felkoder", value: "Ej avlästa")
                 HairLine()
                 ValueRow(title: "Nivåreglering", value: levelText)
+                HairLine()
+                HStack(spacing: 8) {
+                    ActionButton(title: "Testa anslutning",
+                                 enabled: !demo.enabled && transport.ready && !service.busy) {
+                        Task { await service.runSelfTest() }
+                    }
+                }
+                .padding(11)
             }
         }
     }

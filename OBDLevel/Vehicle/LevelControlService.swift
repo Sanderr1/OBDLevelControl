@@ -242,6 +242,35 @@ final class LevelControlService: ObservableObject {
         }
     }
 
+    // MARK: Self test
+
+    /// Runs the whole ladder and reports where it stops: protocol, CAN ids, generation,
+    /// extended session, tester present.
+    func runSelfTest() async {
+        await run("självtest") {
+            var lines: [String] = []
+            do {
+                try await self.transport.setProtocol(.isoTP)
+                lines.append("20 02 ok")
+
+                let gen = try await self.transport.readGeneration()
+                lines.append("generation \(gen)")
+
+                try await self.transport.setCAN(tx: self.profile.txId, rx: self.profile.rxId)
+                lines.append(String(format: "CAN %03X→%03X ok", self.profile.txId, self.profile.rxId))
+
+                let session = try await self.ecu.send([0x10, 0x03])
+                lines.append("10 03 → " + session.hex)
+
+                let alive = try await self.ecu.send([0x3E, 0x00])
+                lines.append("3E 00 → " + alive.hex)
+            } catch {
+                lines.append("stopp: " + error.localizedDescription)
+            }
+            self.statusLine = lines.joined(separator: " · ")
+        }
+    }
+
     // MARK: Heights
 
     func readHeights() async {

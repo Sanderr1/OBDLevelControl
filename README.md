@@ -96,17 +96,57 @@ bearing here — the ECU does not know or care which plan you bought.
 
 ## 3. Wire protocol
 
-Binary, not ASCII hex. Three frame types:
+Two layers. The inner layer is the command (`21 …`, `22 …`, `20 …`, `08 …`). The outer layer is
+what actually goes over BLE, and it is **not** the command bytes — they are obfuscated, checked
+and escaped first. Writing the raw command bytes to `FFE1` does nothing at all, which is exactly
+what happens if you skip this section.
 
-### Request / response
+### Outer layer: framing, obfuscation, CRC
+
+Recovered from `com.voltasit.obdeleven.utils.bluetooth.n` (`DeviceBase`), methods `a()`, `l()`,
+`j()` and `k()`.
+
+**Encode a command** (hex string → bytes `P`):
+
+1. Pick a random key with bit 7 set: `key = random(0…127) | 0x80`.
+2. Emit `key` itself, then every payload byte XORed with `key`. After each byte, rotate the key
+   right by one bit: `key = ((key >> 1) | (key << 7)) & 0xFF`.
+3. Compute CRC-16/XMODEM over those bytes — init `0x0000`, poly `0x1021`, MSB first — and append
+   it **low byte then high byte**.
+4. Wrap in `0x0F … 0x04`, escaping `0x04`, `0x05` and `0x0F` with a leading `0x05`:
+
+```
+wire = 0F <escaped body> 04
+```
+
+**Decode a response** (mirror image):
+
+1. Split the stream on `0x0F` (start) and `0x04` (end); `0x05` escapes the next byte.
+2. Drop the last two bytes (CRC — the client never verifies it).
+3. If the first byte has bit 7 set, it is the key: XOR the rest with it, rotating right one bit
+   per byte, and drop the key byte.
+
+What comes out is the inner command response, e.g. `21 00 02 00 50 03`.
+
+`DeviceBase.a()` skips all of this for commands where `c()` is true (raw mode, used by firmware
+traffic). Every diagnostic command in this app is `c() == false`, so every write is encoded and
+every read is decoded.
+
+### Chunking
+
+`LeBluetoothDevice.b(byte)` buffers exactly **20 bytes** and flushes when the buffer is full;
+the remainder is flushed at the end. So a logical frame is split at arbitrary 20-byte boundaries
+and the adapter reassembles it from the `0x0F`/`0x04` markers. Writes use write-with-response and
+the next chunk is only sent after `didWriteValueFor`.
+
+### Inner layer: commands
 
 ```
 request   21 <lenLo> <lenHi> <payload...>
 response  21 <err>   <lenLo> <lenHi> <data...>
 ```
 
-- `err == 0` means success. Anything else aborts the command (the Android client throws
-  `CommandException(err)`).
+- `err == 0` means success. Anything else aborts the command (`CommandException(err)`).
 - `len` is little-endian and counts **payload bytes only**, not header.
 - `payload` is the **raw UDS request** — e.g. `22 F1 87`, `31 01 03 21`, `10 03`.
 - `data` is the raw UDS response, e.g. `62 F1 87 00 1A`.
@@ -123,8 +163,9 @@ response  22 <err> <data...>
 | `00` | CAN receive filter (rx id) | 4 bytes, big-endian CAN id |
 | `01` | CAN transmit id (tx id) | 4 bytes, big-endian CAN id |
 
-Response has **no length field** — the whole remainder of the frame after `err` is the payload.
-Send these one at a time and let each notification complete.
+Confirmed in `SetCanFilterUC` (`"00" + id`) and `SetCanTxIdUC` (`"01" + id`). Response has **no
+length field** — the whole remainder of the frame after `err` is the payload. Send these one at a
+time and let each notification complete.
 
 ### Protocol select
 
@@ -145,7 +186,18 @@ response  20 <err>
 
 For UDS on CAN you want `02`.
 
+### Generation
+
+```
+request   08
+response  08 00 <gen>
+```
+
+`ReadDeviceGenerationCommand` checks `bArr[0] == 8 && bArr[1] == 0` and returns `bArr[2]`.
+
 ### Example: trivial exchange
+
+Inner commands:
 
 ```
 > 20 02
@@ -156,6 +208,13 @@ For UDS on CAN you want `02`.
 < 22 01
 > 21 02 00 10 03
 < 21 00 02 00 50 03
+```
+
+What crosses the BLE link for the last one — one key byte, XORed payload, CRC, escaped:
+
+```
+> 0F C3 9B E8 5A 62 15 F4 3B 6D ... 04
+< 0F 9A 8F FA 1C 2D ... 04
 ```
 
 `50 03` = positive response to `10 03`, extended session active.
