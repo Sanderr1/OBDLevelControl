@@ -403,18 +403,31 @@ counter that some modules persist.
 
 ## 10. Where the IDs come from
 
-They are not in the APK. The full chain, verified:
+They are not in the APK. The full chain, verified end to end:
 
-1. `ServerApiImpl.getOdxListByPlatform` / `getOdxListByName` fetch an **ODX pack** from the server,
-   resource key `"ODX"`, per platform or per name.
-2. `OdxRepositoryImpl` / `OdxWorkerRepositoryImpl` parse it with SimpleXML into `DIAG-LAYER`,
-   `BASIC-STRUCTURE`, `PARAMS`, `REQUESTS`, `POS-RESPONSES`.
-3. `GetBasicSettingsUC` builds the list the UI shows.
-4. Display names come from `Texttabe.c("MAS00112")`-style ids resolved against a translation
-   table that is also not bundled.
+1. `ServerApiImpl.getOdxListByName` / `getOdxListByPlatform` query the Parse class **`ODX`**
+   (`where={"values":"EV_AirSuspe"}`), which returns `fileName`, `platform` and a `file` URL on
+   `storage.obdeleven.com`.
+2. The download is a **ZIP with AES-256** (`compress_type 99`, general-purpose flag bit 0 set),
+   one entry such as `EV_AirSuspe_003024.odx` (~731 kB XML).
+3. The ZIP password is not shipped either: `NetworkOdxFactory` calls the cloud function
+   **`functions/odxV2`** (no params), gets back 32 bytes of hex ciphertext, and runs
+   `AES/CBC/PKCS5` over it with hex key `c(6)` and hex IV `c(7)` from
+   `Parse.invokeNativeFunction(index)` — a **native symbol**, so both constants live in
+   `lib*.so`, not in the dex.
+4. `OdxRepositoryImpl` / `OdxWorkerRepositoryImpl` then parse the decrypted XML with SimpleXML into
+   `DIAG-LAYER`, `BASIC-STRUCTURE`, `PARAMS`, `REQUESTS`, `POS-RESPONSES`.
+5. `GetBasicSettingsUC` builds the list the UI shows, and display names are `MAS…` text ids
+   resolved against a translation table that is not bundled either.
 
-The APK has **no strings.xml, no bundled resources, no hardcoded DID or RID table**. That is why
+The APK has **no strings.xml, no bundled resources, no hardcoded DID or RID table**, and the
+emulator build has an empty `lib/x86_64`, so even the native key is not in the dump. That is why
 this app starts blank and ships scanners instead of a fake list.
+
+I did confirm the packs exist and are readable with a normal logged-in account: the A6 C7 unit
+`EV_AirSuspe` is published in nine variants (002019, 003022, 003024, 003026 across AU57X, AU64X,
+BY73X, BY83X, VW51XCS). Every one of them is AES-encrypted, so the missing piece is exactly one
+native constant, not the data.
 
 ### So how does OBDeleven show "Battery voltage" with a value?
 
