@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var ridStart = "0000"
     @State private var ridCount = "64"
     @State private var confirmReset = false
+    @State private var testRole: ActionRole = .raiseFront
+    @State private var testActionID: UUID?
 
     var body: some View {
         VStack(spacing: 18) {
@@ -21,6 +23,7 @@ struct SettingsView: View {
             mappingSection
             channelSection
             routineSection
+            identifySection
             scanSection
             demoSection
             resetSection
@@ -400,6 +403,68 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: Identify a routine
+
+    private var identifySection: some View {
+        VStack(spacing: 10) {
+            SectionHeading(title: "Identifiera rutin", trailing: "Mät & mappa")
+
+            Card {
+                Text("Kör rutinen i 8 sekunder och mäter hur hjulen rör sig. Flyttar rätt axel åt rätt håll mappas rollen automatiskt.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 11)
+
+                HStack(spacing: 8) {
+                    FieldBox {
+                        VStack(alignment: .leading, spacing: 2) {
+                            FieldCaption(text: "ROLL")
+                            Picker("", selection: $testRole) {
+                                ForEach(ActionRole.allCases) { role in
+                                    Text(role.title).tag(role)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .tint(Palette.ink)
+                        }
+                    }
+                    FieldBox {
+                        VStack(alignment: .leading, spacing: 2) {
+                            FieldCaption(text: "RUTIN")
+                            Picker("", selection: $testActionID) {
+                                Text("—").tag(UUID?.none)
+                                ForEach(service.profile.actions) { action in
+                                    Text(action.rid == 0
+                                         ? action.name
+                                         : String(format: "%@ (%04X)", action.name, action.rid))
+                                        .tag(Optional(action.id))
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .tint(Palette.ink)
+                        }
+                    }
+                }
+                .padding(11)
+
+                HStack(spacing: 8) {
+                    ActionButton(title: "Mät & mappa",
+                                 enabled: transport.ready && !service.busy && testActionID != nil) {
+                        if let action = service.profile.actions.first(where: { $0.id == testActionID }) {
+                            Task { await service.identify(action, role: testRole) }
+                        }
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.bottom, 11)
             }
         }
     }

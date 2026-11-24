@@ -492,6 +492,87 @@ final class LevelControlService: ObservableObject {
         statusLine = "Auto: " + lines.joined(separator: " · ")
     }
 
+    // MARK: Identify
+
+    /// Reads the four wheel channels. Nil where a channel has no DID or does not answer.
+    private func heightSnapshot() async -> [Double?] {
+        var out: [Double?] = []
+        for channel in profile.channels.prefix(4) {
+            guard channel.did != 0,
+                  let data = try? await ecu.readDID(channel.did) else {
+                out.append(nil)
+                continue
+            }
+            out.append(channel.decode(data))
+        }
+        return out
+    }
+
+    /// Runs one routine for a few seconds and measures how the corners moved.
+    /// If the movement matches the selected role's direction, the role is assigned.
+    func identify(_ action: RoutineAction, role: ActionRole?) async {
+        guard action.rid != 0 else {
+            statusLine = "\(action.name): RID saknas"
+            return
+        }
+        guard profile.channels.prefix(4).allSatisfy({ $0.did != 0 }) else {
+            statusLine = "Identifiering kräver fyra höjd-DID — kör Autokonfigurering först"
+            return
+        }
+
+        await run("identifierar \(action.name)") {
+            let before = await self.heightSnapshot()
+
+            self.stopRequested = false
+            self.canStop = true
+            defer { self.canStop = false }
+            _ = try? await self.ecu.runRoutine(action.rid,
+                                               parameters: action.parameters,
+                                               maxSeconds: 8,
+                                               shouldStop: { self.stopRequested })
+            _ = try? await self.ecu.stopRoutine(action.rid)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+
+            let after = await self.heightSnapshot()
+            var deltas: [(WheelSlot, Double)] = []
+            for (index, slot) in WheelSlot.allCases.enumerated() {
+                guard index < before.count, index < after.count,
+                      let old = before[index], let new = after[index] else { continue }
+                deltas.append((slot, new - old))
+            }
+
+            let front = deltas.filter { $0.0.axle == .front }.map { $0.1 }
+            let rear = deltas.filter { $0.0.axle == .rear }.map { $0.1 }
+            let frontMean = front.isEmpty ? nil : front.reduce(0, +) / Double(front.count)
+            let rearMean = rear.isEmpty ? nil : rear.reduce(0, +) / Double(rear.count)
+
+            let summary = deltas
+                .map { String(format: "%@ %+.0f mm", $0.0.title, $0.1) }
+                .joined(separator: " · ")
+
+            if let role, self.matches(role: role, front: frontMean, rear: rearMean) {
+                self.assign(role, to: action.id)
+                self.statusLine = "\(role.title) → \(action.name). \(summary)"
+            } else if summary.isEmpty {
+                self.statusLine = "\(action.name): inga höjder avlästa"
+            } else {
+                self.statusLine = "\(action.name): \(summary)"
+            }
+        }
+    }
+
+    /// Did the axle move at least 5 mm in the direction the role implies?
+    private func matches(role: ActionRole, front: Double?, rear: Double?) -> Bool {
+        func moved(_ value: Double?, _ sign: Double) -> Bool { (value ?? 0) * sign >= 5 }
+        switch role {
+        case .raiseFront: return moved(front, 1)
+        case .lowerFront, .ventFront: return moved(front, -1)
+        case .raiseRear: return moved(rear, 1)
+        case .lowerRear, .ventRear: return moved(rear, -1)
+        default: return false
+        }
+    }
+
     // MARK: Heights
 
     func readHeights() async {

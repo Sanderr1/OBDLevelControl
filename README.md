@@ -49,6 +49,7 @@ with jadx. Nothing here is guessed.
 | Automatic DID discovery (`22` probing + scaling guesses) | works, ranges configurable |
 | Automatic RID discovery (`31 03` only, never starts anything) | works |
 | Quick raise / lower buttons | works once the four roles are mapped |
+| Identify a routine by measuring (`Mät & mappa`) | works — runs 8 s, measures the corners, assigns the role |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
 | 1st-gen adapter on iOS | **impossible** (Classic SPP, needs MFi) |
@@ -438,6 +439,23 @@ Routines are probed with `31 03` only. `31 03` asks for results and changes noth
 *starts* the routine, so the automatic search never sends it. Every RID that answers `31 03` is a
 real basic setting in that control unit.
 
+### The EV_AirSuspe unit (Audi A6 C7)
+
+The Chassis Control module reports itself as:
+
+| Field | Value |
+|---|---|
+| ID | 34 |
+| Protocol | CAN: UDS |
+| Software | 4G0907553F, version 0782 |
+| Hardware | 4G0907553F, H18 |
+| ODX | `EV_AirSuspe` 003024 |
+| System | J197, `LUFE-DAEMPFER` |
+
+That gives the whole transport: physical request `714`, response `77E`, ISO-TP, UDS — exactly the
+profile default. The name→ID map for that unit is inside `EV_AirSuspe` 003024, which is downloaded
+per car and never shipped. Nothing here can enumerate it offline.
+
 ---
 
 ## 11. Finding your car's IDs
@@ -571,6 +589,10 @@ either talks to the adapter or, in demo mode, to a local simulation.
   and System to actual RIDs.
 - Channel editor: name, DID, byte count, scale, unit, signed, add/remove.
 - Routine editor: name, RID, run and stop for any routine (not just mapped ones).
+- *Identifiera rutin*: pick a role and a routine, press *Mät & mappa*. It reads the four heights,
+  runs the routine for 8 s, stops it, waits 0,8 s, reads again and reports the movement per corner.
+  If the right axle moved ≥5 mm in the right direction the role is assigned automatically —
+  e.g. `Höj fram → RID 0A41. Vänster fram +27 mm · Höger fram +26 mm · Vänster bak +1 mm …`.
 - DID scanner (`F180`, count 32) and routine scanner (`31 03`, start/count).
 - Demo mode and reset.
 
