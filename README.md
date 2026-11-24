@@ -43,6 +43,8 @@ with jadx. Nothing here is guessed.
 | Read DIDs (live values, heights) | works |
 | Start / stop / poll routines (`31 01`, `31 02`, `31 03`) | works |
 | Session control (`10 03`), tester present (`3E 00`) | works |
+| Adapter generation read (`08` → 1/2/3, Pro 3) | works |
+| Demo mode (simulated heights, no BLE) | works |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
 | 1st-gen adapter on iOS | **impossible** (Classic SPP, needs MFi) |
@@ -414,28 +416,71 @@ Only Bluetooth. No background modes needed — the app must be in the foreground
 
 ## 13. Using the app
 
-**Link**
-- Scan → tap the adapter.
-- Once `ready`, Open ECU uses the TX/RX ids from Config and enters extended session.
+The interface follows the dark mockup `obd-height-controller.html`: Swedish labels, four tabs,
+big wheel-height cards, one card per control group. It is a real tool, not the demo — every button
+either talks to the adapter or, in demo mode, to a local simulation.
 
-**Heights**
-- Read now, or auto-refresh every 2 s.
-- Each row shows the decoded value and the raw response bytes, so you can sanity-check scaling.
+**Header**
+- Car name, vehicle line and status badge: `DEMO`, `LIVE` or `OFFLINE`.
+- The connection bar opens the adapter sheet: scan, connect, disconnect, generation, TX/RX,
+  *Öppna styrenhet*.
 
-**Actions**
-- One row per routine. Run asks for confirmation (the car moves), then starts and polls.
-- Stop sends `31 02` for that RID.
-- Rows with `no routine id` are disabled — fill the id in Config.
+**Översikt**
+- Four wheel heights in a 2×2 grid. `Läs nu` reads every channel; `Auto 2 s` repeats it.
+- *Nivåreglering* is a switch. It sends the routine mapped to `Nivåreglering av` / `på` and keeps
+  the app's own state, because the ECU does not expose a readable flag.
+- *Vent fram*, *Vent bak*, *Vent båda* are only enabled while level control is off — same
+  interlock as VCDS/OBDeleven. *Vent båda* runs front, then rear, sequentially.
+- Live venting asks for confirmation first. The car moves.
 
-**Config**
-- CAN ids, height channels (DID/len/scale/offset/signed), routine ids.
-- DID scanner and routine scanner.
-- Restore defaults.
+**System**
+- One card per channel after the fourth (defaults: `Systemtryck` in bar, `Kompressortemperatur`
+  in °C).
+- Compressor state and *Fyll behållare* / *Lufta behållare*, mapped by role.
 
-**Console**
-- Type any UDS request as hex (`22 F1 90`, `31 01 03 21`, `10 03`) and send.
-- Every frame in and out is logged with direction arrows.
-- Use this to poke at things before wiring them into the UI.
+**Diagnostik**
+- Controller address, adapter + generation, link state, protocol, DTC status.
+- Every channel with decoded value, DID and raw response bytes — use this to verify scaling.
+- Hex console for arbitrary UDS requests, and the frame log.
+
+**Inställningar**
+- Car name and vehicle line.
+- TX/RX CAN ids as hex fields, plus a shortcut to the adapter sheet.
+- *Funktionsmappning*: six roles → routine pickers. This is what wires the buttons on Översikt
+  and System to actual RIDs.
+- Channel editor: name, DID, byte count, scale, unit, signed, add/remove.
+- Routine editor: name, RID, run and stop for any routine (not just mapped ones).
+- DID scanner (`F180`, count 32) and routine scanner (`31 03`, start/count).
+- Demo mode and reset.
+
+### Demo mode
+
+*Inställningar → Demoläge* runs the simulation from the HTML mockup: 385/388/392/390 mm,
+8.2 bar, 36 °C, the same ramp rates and the same interlock. Nothing is sent over BLE, and the
+header shows an amber `DEMO` badge.
+
+*Visa exempelvärden* hides or shows the numbers, exactly like the mockup's
+*Visa exempelvärden*. In live mode it has no effect: real readings are always shown.
+
+*Återställ demot* cancels running simulations and restores heights, pressure, temperature, level
+control and the value display.
+
+### Role mapping
+
+Routine ids are not guesses — but their names are per-car. Instead of hardcoding "vent front is
+RID 0x1234", the app maps six roles to whatever routines your profile contains:
+
+| Role | Button |
+|---|---|
+| `ventFront` | Vent fram |
+| `ventRear` | Vent bak |
+| `levelOff` | Nivåreglering av |
+| `levelOn` | Nivåreglering på |
+| `reservoirFill` | Fyll behållare |
+| `reservoirVent` | Lufta behållare |
+
+Unmapped buttons are disabled — no accidental `31 01` with RID 0. Profiles created before roles
+existed are migrated once, by name, on first launch.
 
 ---
 
@@ -446,17 +491,23 @@ OBDLevelControl/
 ├── project.yml                            XcodeGen manifest
 ├── README.md
 └── OBDLevel/
-    ├── OBDLevelApp.swift                  @main, wires transport + service
+    ├── OBDLevelApp.swift                  @main, wires transport + service + demo
     ├── Transport/
     │   ├── OBDelevenTransport.swift       BLE, 20-byte chunking, frame parser,
-    │   │                                  command gate, timeouts, logging
+    │   │                                  command gate, generation, timeouts, logging
     │   └── ECUConnection.swift            UDS: session, DID read, routines,
     │                                      NRC retry, security access
     ├── Vehicle/
-    │   └── LevelControlService.swift      profile persistence, channel decode,
-    │                                      actions, DID/RID scanners
+    │   ├── LevelControlService.swift      profile persistence, channel decode,
+    │   │                                  roles, actions, DID/RID scanners
+    │   └── DemoModel.swift                HTML mockup simulation, nothing on the wire
     └── UI/
-        └── ContentView.swift              Link, Heights, Actions, Config, Console
+        ├── Theme.swift                    palette, cards, hex fields, buttons
+        ├── ContentView.swift              header, tab bar, adapter sheet
+        ├── OverviewView.swift             wheel heights, level control, venting
+        ├── SystemView.swift               pressure, temperature, reservoir
+        ├── DiagnosticsView.swift          link info, sensors, console, log
+        └── SettingsView.swift             car, mapping, channels, routines, scans, demo
 ```
 
 Key types:
@@ -467,9 +518,12 @@ Key types:
 | `DeviceProtocol` | transport selector (`20 xx`) |
 | `OBDError` / `NRC` | error + negative-response decoding |
 | `ECUConnection` | UDS layer, one instance per ECU address pair |
-| `HeightChannel` | DID + decoding recipe |
-| `RoutineAction` | RID + parameters + confirm flag |
+| `HeightChannel` | DID + decoding recipe + unit |
+| `RoutineAction` | RID + parameters + role |
+| `ActionRole` | which button a routine is wired to |
 | `LevelControlService` | observable state for the UI, persists profile in `UserDefaults` |
+| `DemoModel` | simulated heights, pressure, temperature and compressor for demo mode |
+| `Palette` | the mockup's colours, in one place |
 
 ---
 
