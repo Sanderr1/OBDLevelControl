@@ -63,6 +63,24 @@ In the APK these are two separate classes: `ClassicBluetoothDevice` (RFCOMM sock
 `LeBluetoothDevice` (GATT). The old dongle is a serial-port-profile device — Apple requires MFi
 certification for SPP, so CoreBluetooth will never see it. Use the 2nd-gen adapter.
 
+### Generations
+
+The adapter reports its own generation: command `08` returns `08 00 <gen>`
+(`ReadDeviceGenerationCommand` in the APK).
+
+| Gen | Hardware | Generation byte |
+|---|---|---|
+| 1 | classic SPP | 1 |
+| 2 | BLE | 2 |
+| 3 | **Pro 3**, BLE | 3 |
+
+**Pro 3 works with this app.** It answers generation `3` on the same command channel, and the
+frame set (`08`, `20`, `21`, `22`) is unchanged. The Link tab shows the generation as soon as the
+characteristic subscribes, so you can verify the link before touching an ECU.
+
+"Pro" is the subscription tier that unlocks basic settings *inside the official app*. It has no
+bearing here — the ECU does not know or care which plan you bought.
+
 **Characteristic details**
 
 - Write to `FFE1`, notifications from `FFE1`. Enable notifications right after discovery.

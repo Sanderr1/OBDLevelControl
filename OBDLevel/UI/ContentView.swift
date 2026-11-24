@@ -37,6 +37,9 @@ struct ConnectView: View {
                             .fill(transport.ready ? .green : .orange)
                             .frame(width: 10, height: 10)
                     }
+                    if let gen = transport.generation {
+                        LabeledContent("Generation", value: gen == 3 ? "3 (Pro 3)" : "\(gen)")
+                    }
                     if transport.ready {
                         Button("Disconnect", role: .destructive) { transport.disconnect() }
                     } else {

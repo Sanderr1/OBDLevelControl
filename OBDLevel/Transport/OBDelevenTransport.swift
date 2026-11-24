@@ -73,7 +73,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         let name: String
     }
 
-    enum Kind { case proto, command, ioCtl }
+    enum Kind { case proto, command, ioCtl, generation }
 
     static let svcData = CBUUID(string: "FFE0")
     static let chrData = CBUUID(string: "FFE1")
@@ -83,6 +83,8 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     @Published private(set) var statusText = "idle"
     @Published private(set) var ready = false
     @Published private(set) var connectedName = ""
+    /// 1 = classic SPP dongle, 2 = BLE, 3 = Pro 3 generation
+    @Published private(set) var generation: UInt8?
     @Published var devices: [Discovered] = []
     @Published var log: [String] = []
 
@@ -141,6 +143,16 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     func setProtocol(_ proto: DeviceProtocol) async throws {
         _ = try await exchange([0x20, proto.rawValue], kind: .proto)
+    }
+
+    /// 0x08 -> 0x08 0x00 <generation>. 3 = Pro 3 hardware.
+    @discardableResult
+    func readGeneration() async throws -> UInt8 {
+        let payload = try await exchange([0x08], kind: .generation)
+        let gen = payload.first ?? 0
+        generation = gen
+        note("adapter generation \(gen)")
+        return gen
     }
 
     func setCAN(tx: UInt32, rx: UInt32) async throws {
@@ -231,6 +243,13 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 rx.removeFirst(2)
                 deliver(.proto, [], err)
 
+            case 0x08:
+                guard rx.count >= 3 else { return }
+                let err = rx[1]
+                let gen = rx[2]
+                rx.removeFirst(3)
+                deliver(.generation, [gen], err)
+
             case 0x21:
                 guard rx.count >= 4 else { return }
                 let err = rx[1]
@@ -269,6 +288,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         ready = false
         dataChar = nil
         connectedName = ""
+        generation = nil
         rx.removeAll()
         inbox.removeAll()
     }
@@ -343,6 +363,7 @@ extension OBDelevenTransport: CBPeripheralDelegate {
             ready = true
             statusText = "ready"
             note("connected to \(peripheral.name ?? "adapter")")
+            Task { try? await self.readGeneration() }
         }
     }
 
