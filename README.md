@@ -460,6 +460,28 @@ per car and never shipped. Nothing here can enumerate it offline.
 
 ## 11. Finding your car's IDs
 
+### Already filled in: EV_AirSuspe 003024
+
+The measuring values that unit lists give five DIDs that do not change between cars:
+
+| Value | DID | Bytes | Scale | Unit |
+|---|---|---|---|---|
+| Body height left front wheel house edge | `258F` | 2 | 0.1 | mm |
+| Body height right front wheel house edge | `2590` | 2 | 0.1 | mm |
+| Body height left rear wheel house edge | `2591` | 2 | 0.1 | mm |
+| Body height right rear wheel house edge | `2592` | 2 | 0.1 | mm |
+| System pressure | `2B83` | 2 | 0.01 | bar |
+
+`LevelProfile.blank` ships with those five, so a fresh install reads heights and pressure without
+a scan. *Inställningar → Autokonfigurering → Kända DID* re-applies them if the profile has been
+edited or the numbers turn out wrong for your car.
+
+The rest of the values the module lists are diagnostics rather than measurements and are left out
+on purpose: `1308` activations of the exhaust valve, `1309` car-jack mode, `220D` doors/lids status
+(a bit field, not a number), `282A` Audi drive select (an enum). *Compressor temperature* sits
+below them in the same list — its DID was not visible, so that channel still says `0000` until you
+run the scan or type it in.
+
 ### Automatically
 
 *Inställningar → Autokonfigurering → Allt automatiskt* runs both searches with the configured
@@ -472,7 +494,8 @@ What it does:
 - **Values** — asks `22 <did>` for each id in the range and decodes each answer with the standard
   VAG scalings. The single best interpretation per DID is kept, then: one voltage → battery,
   one pressure → the channel with unit `bar`, one temperature → the channel with unit `°C`, and the
-  four lowest ids that look like heights → the four wheel cards.
+  four lowest ids that look like heights → the four wheel cards. Only channels without a DID are
+  filled; *Skriv över befintliga DID* makes it replace what is already there.
 - **Routines** — asks `31 03 <rid>` for each id in the range and turns every answer into a row in
   the routine list, named `RID xxxx`. Map those to the buttons under *Funktionsmappning*.
 
@@ -584,7 +607,7 @@ either talks to the adapter or, in demo mode, to a local simulation.
 - Car name and vehicle line.
 - TX/RX CAN ids as hex fields, plus a shortcut to the adapter sheet.
 - *Autokonfigurering*: DID range, RID range, *Hitta värden*, *Hitta rutiner*, *Allt automatiskt*,
-  and *Kör vid anslutning*.
+  *Kända DID*, *Kör vid anslutning*, and *Skriv över befintliga DID*.
 - *Funktionsmappning*: ten roles → routine pickers. This is what wires the buttons on Översikt
   and System to actual RIDs.
 - Channel editor: name, DID, byte count, scale, unit, signed, add/remove.

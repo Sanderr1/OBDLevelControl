@@ -125,6 +125,11 @@ struct SettingsView: View {
                           isOn: $service.autoSettings.onConnect)
                 HairLine()
 
+                SwitchRow(title: "Skriv över befintliga DID",
+                          detail: "Av: bara kanaler utan DID fylls. På: ersätter även kända värden.",
+                          isOn: $service.autoSettings.overwriteExisting)
+                HairLine()
+
                 VStack(alignment: .leading, spacing: 8) {
                     FieldCaption(text: "DID — 22 <did>, intervall")
 
@@ -196,6 +201,9 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     ActionButton(title: "Allt automatiskt", enabled: scanEnabled) {
                         Task { await service.autoConfigure() }
+                    }
+                    ActionButton(title: "Kända DID", enabled: !service.busy) {
+                        service.applyKnownDIDs()
                     }
                 }
                 .padding(11)

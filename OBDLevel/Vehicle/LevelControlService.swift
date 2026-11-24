@@ -146,6 +146,17 @@ struct LevelProfile: Codable {
     /// Which channel shows the battery voltage. Optional so older profiles still decode.
     var battery: UUID?
 
+    /// The measuring values the EV_AirSuspe unit (Audi A6 C7 air suspension) lists,
+    /// in the order OBDeleven shows them. The numbers are DIDs and do not change;
+    /// only the names come from the ODX pack.
+    static let knownDIDs: [(name: String, did: UInt16, length: Int, scale: Double, unit: String?)] = [
+        ("Vänster fram", 0x258F, 2, 0.1, "mm"),
+        ("Höger fram", 0x2590, 2, 0.1, "mm"),
+        ("Vänster bak", 0x2591, 2, 0.1, "mm"),
+        ("Höger bak", 0x2592, 2, 0.1, "mm"),
+        ("Systemtryck", 0x2B83, 2, 0.01, "bar")
+    ]
+
     static var blank: LevelProfile {
         let battery = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
@@ -155,11 +166,11 @@ struct LevelProfile: Codable {
             txId: 0x714,
             rxId: 0x77E,
             channels: [
-                HeightChannel(name: "Vänster fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-                HeightChannel(name: "Höger fram", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-                HeightChannel(name: "Vänster bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-                HeightChannel(name: "Höger bak", did: 0x0000, length: 2, scale: 0.1, offset: 0, signed: true, unit: "mm"),
-                HeightChannel(name: "Systemtryck", did: 0x0000, length: 2, scale: 0.01, offset: 0, signed: false, unit: "bar"),
+                HeightChannel(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
+                HeightChannel(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
+                HeightChannel(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
+                HeightChannel(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
+                HeightChannel(name: "Systemtryck", did: 0x2B83, length: 2, scale: 0.01, offset: 0, signed: false, unit: "bar"),
                 HeightChannel(name: "Kompressortemperatur", did: 0x0000, length: 1, scale: 1, offset: 0, signed: false, unit: "°C"),
                 battery
             ],
@@ -188,6 +199,22 @@ struct AutoSettings: Codable {
     var ridStart: UInt16 = 0x0000
     var ridCount: Int = 256
     var onConnect = true
+    /// Replace channels that already have a DID instead of only filling empty ones.
+    var overwriteExisting = false
+
+    init() {}
+
+    /// Reads whatever an older stored copy has and defaults the rest, so adding a
+    /// field here never throws away the saved ranges.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        didStart = try c.decodeIfPresent(UInt16.self, forKey: .didStart) ?? 0x0000
+        didCount = try c.decodeIfPresent(Int.self, forKey: .didCount) ?? 256
+        ridStart = try c.decodeIfPresent(UInt16.self, forKey: .ridStart) ?? 0x0000
+        ridCount = try c.decodeIfPresent(Int.self, forKey: .ridCount) ?? 256
+        onConnect = try c.decodeIfPresent(Bool.self, forKey: .onConnect) ?? true
+        overwriteExisting = try c.decodeIfPresent(Bool.self, forKey: .overwriteExisting) ?? false
+    }
 }
 
 struct HeightReading: Identifiable {
@@ -347,6 +374,25 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Automatic configuration
 
+    /// Writes the known DID map for EV_AirSuspe 003024 into the profile.
+    /// These come from the measuring values the module itself lists — the numbers are
+    /// fixed for that control unit, only the labels come from the ODX pack.
+    func applyKnownDIDs() {
+        var updated = profile
+        var lines: [String] = []
+        for (index, known) in LevelProfile.knownDIDs.enumerated() where index < updated.channels.count {
+            updated.channels[index].did = known.did
+            updated.channels[index].length = known.length
+            updated.channels[index].scale = known.scale
+            updated.channels[index].offset = 0
+            updated.channels[index].signed = false
+            updated.channels[index].unit = known.unit
+            lines.append(String(format: "%@ %04X", known.name, known.did))
+        }
+        profile = updated
+        statusLine = "DID ifyllda: " + lines.joined(separator: " · ")
+    }
+
     /// One tap: find DIDs that decode to plausible values, then find implemented routines.
     func autoConfigure() async {
         await autoFindValues(from: autoSettings.didStart, count: autoSettings.didCount)
@@ -422,6 +468,7 @@ final class LevelControlService: ObservableObject {
         var updated = profile
         var used: Set<UInt16> = []
         var lines: [String] = []
+        let overwrite = autoSettings.overwriteExisting
 
         func take(_ kind: ValueKind) -> ValueCandidate? {
             let match = candidates
@@ -444,7 +491,7 @@ final class LevelControlService: ObservableObject {
 
         if let pressure = take(.pressure),
            let index = updated.channels.firstIndex(where: {
-               ($0.unit ?? "").lowercased() == "bar" && $0.did == 0
+               ($0.unit ?? "").lowercased() == "bar" && (overwrite || $0.did == 0)
            }) {
             updated.channels[index].did = pressure.did
             updated.channels[index].length = pressure.length
@@ -456,7 +503,7 @@ final class LevelControlService: ObservableObject {
 
         if let temperature = take(.temperature),
            let index = updated.channels.firstIndex(where: {
-               ($0.unit ?? "").uppercased().contains("C") && $0.did == 0
+               ($0.unit ?? "").uppercased().contains("C") && (overwrite || $0.did == 0)
            }) {
             updated.channels[index].did = temperature.did
             updated.channels[index].length = temperature.length
@@ -470,17 +517,22 @@ final class LevelControlService: ObservableObject {
             .filter { $0.kind == .distance && !used.contains($0.did)
                 && $0.value >= 280 && $0.value <= 480 }
             .sorted { $0.did < $1.did }
-            .prefix(4)
 
-        for (slot, candidate) in zip(WheelSlot.allCases, heights) {
-            let index = slot.rawValue
-            guard index < updated.channels.count else { break }
-            updated.channels[index].did = candidate.did
-            updated.channels[index].length = candidate.length
-            updated.channels[index].scale = candidate.scale
-            updated.channels[index].signed = candidate.signed
-            updated.channels[index].offset = 0
-            lines.append(String(format: "%@ %04X = %.0f mm", slot.title, candidate.did, candidate.value))
+        var slot = 0
+        for candidate in heights {
+            while slot < 4, slot < updated.channels.count,
+                  !overwrite, updated.channels[slot].did != 0 {
+                slot += 1
+            }
+            guard slot < 4, slot < updated.channels.count else { break }
+            updated.channels[slot].did = candidate.did
+            updated.channels[slot].length = candidate.length
+            updated.channels[slot].scale = candidate.scale
+            updated.channels[slot].signed = candidate.signed
+            updated.channels[slot].offset = 0
+            let title = WheelSlot(rawValue: slot)?.title ?? "Kanal \(slot + 1)"
+            lines.append(String(format: "%@ %04X = %.0f mm", title, candidate.did, candidate.value))
+            slot += 1
         }
 
         guard !lines.isEmpty else {
