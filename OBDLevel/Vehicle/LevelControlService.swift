@@ -873,7 +873,7 @@ final class LevelControlService: ObservableObject {
                 }
             }
             self.readings = out
-            self.ecuOpen = self.ecuOpen || out.contains { $0.value != nil }
+            self.ecuOpen = self.ecuOpen || out.contains(where: { $0.value != nil })
             if out.contains(where: { $0.did != 0 && $0.raw.hasPrefix("err") }) {
                 let first = out.first { $0.raw.hasPrefix("err") }
                 self.statusLine = "Fel vid läsning: " + (first?.raw ?? "")
