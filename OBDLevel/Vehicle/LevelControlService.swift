@@ -983,6 +983,28 @@ final class LevelControlService: ObservableObject {
         }
     }
 
+    /// Moves both axles on one press. The module has one routine per axle, so the
+    /// second one starts when the first has finished, with a short pause so the car
+    /// settles instead of fighting the valve block. Stoppa cancels between them.
+    func moveBoth(up: Bool) async {
+        let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
+        let actions = roles.compactMap { action(for: $0) }
+        guard actions.count == 2 else {
+            statusLine = "\(up ? "Höj" : "Sänk") saknar mappad rutin (Inställningar → Funktionsmappning)"
+            return
+        }
+        stopRequested = false
+        var finished = 0
+        for (index, action) in actions.enumerated() {
+            if stopRequested { break }
+            statusLine = "\(up ? "Höjer" : "Sänker") \(index == 0 ? "fram" : "bak")…"
+            guard await runAction(action) else { break }
+            finished += 1
+            if index == 0 { try? await Task.sleep(nanoseconds: 600_000_000) }
+        }
+        if finished == 2 { statusLine = "\(up ? "Höjt" : "Sänkt") båda axlarna" }
+    }
+
     /// Asks a running routine to stop. The next 31 03 poll is replaced by 31 02.
     func requestStop() {
         guard canStop else { return }

@@ -97,6 +97,41 @@ struct OverviewView: View {
             SectionHeading(title: "Höj & sänk", trailing: demo.enabled ? "Simulering" : "Live")
 
             Card {
+                HStack(spacing: 8) {
+                    ActionButton(title: "Höj", enabled: bothEnabled(up: true)) {
+                        moveBoth(up: true)
+                    }
+                    ActionButton(title: "Sänk", enabled: bothEnabled(up: false)) {
+                        moveBoth(up: false)
+                    }
+                }
+                .padding(11)
+
+                if service.canStop {
+                    HairLine()
+                    HStack(spacing: 8) {
+                        ActionButton(title: "Stoppa", running: true) {
+                            service.requestStop()
+                        }
+                    }
+                    .padding(11)
+                }
+
+                HairLine()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Båda axlarna · fram först, sedan bak")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Text(rideStatus)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+
+            Card {
                 ForEach([Axle.front, Axle.rear], id: \.self) { axle in
                     if axle == .rear { HairLine() }
                     HStack(spacing: 8) {
@@ -114,33 +149,30 @@ struct OverviewView: View {
                     }
                     .padding(11)
                 }
-
-                if service.canStop {
-                    HairLine()
-                    HStack(spacing: 8) {
-                        ActionButton(title: "Stoppa", running: true) {
-                            service.requestStop()
-                        }
-                    }
-                    .padding(11)
-                }
-
-                HairLine()
-                Text(rideStatus)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
             }
 
             if !demo.enabled {
-                Text("Kör den rutin som är mappad under Inställningar → Funktionsmappning. Omappade knappar är avstängda.")
+                Text("En tryckning på Höj/Sänk kör fram och bak i tur och ordning. Korten under styr en axel i taget. Rutinerna mappas under Inställningar → Funktionsmappning; omappade knappar är avstängda.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 2)
             }
+        }
+    }
+
+    private func bothEnabled(up: Bool) -> Bool {
+        if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+        let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
+        return !service.busy && roles.allSatisfy { service.hasRoutine($0) }
+    }
+
+    private func moveBoth(up: Bool) {
+        if demo.enabled {
+            demo.lift(.front, up: up)
+            demo.lift(.rear, up: up)
+        } else {
+            Task { await service.moveBoth(up: up) }
         }
     }
 
