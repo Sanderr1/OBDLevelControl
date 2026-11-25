@@ -89,6 +89,9 @@ final class ECUConnection {
                 }
                 throw OBDError.nrc(code)
             }
+            // `21 00` is the adapter saying "request sent, nothing came back".
+            // Treating it as a successful empty answer made the ECU look open.
+            if response.isEmpty { throw OBDError.badResponse("tomt svar (inget från modulen)") }
             return response
         }
     }

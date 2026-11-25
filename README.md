@@ -248,13 +248,20 @@ Inner commands:
 ```
 > 20 02
 < 20 00
-> 22 00 00 00 07 7E
+> 22 00 7E 07 00 00
 < 22 00
-> 22 01 00 00 07 14
-< 22 01
+> 22 01 14 07 00 00
+< 22 00
 > 21 02 00 10 03
 < 21 00 02 00 50 03
 ```
+
+The id bytes are **little-endian**, exactly what `Converter.g()` builds in the Android client:
+`0x77E → 7E 07 00 00`, `0x714 → 14 07 00 00`. A 29-bit id sets bit 31 first
+(`id | 0x80000000` → `7E 07 00 80`). Writing them big-endian (`00 00 07 7E`) is accepted by the
+ioctl and looks like success, but the adapter then filters on a bus that does not exist and answers
+every UDS request with `21 FE` (`RESULT_NOT_CONNECTED`) — which is exactly how a wrong-endianness
+bug presents itself.
 
 What crosses the BLE link for the last one — one key byte, XORed payload, CRC, escaped:
 
@@ -275,8 +282,8 @@ What crosses the BLE link for the last one — one key byte, XORed payload, CRC,
 | `20 <err>` | adapter → host | protocol set result |
 | `21 <lo> <hi> <uds>` | host → adapter | UDS request |
 | `21 <err> <lo> <hi> <data>` | adapter → host | UDS response |
-| `22 00 <id4>` | host → adapter | set CAN rx filter |
-| `22 01 <id4>` | host → adapter | set CAN tx id |
+| `22 00 <id4>` | host → adapter | set CAN rx filter (id little-endian) |
+| `22 01 <id4>` | host → adapter | set CAN tx id (id little-endian) |
 | `22 <err> <echo…>` | adapter → host | ioctl result |
 
 Timing rules taken from the client:
@@ -332,9 +339,9 @@ of the ignition cycle, sometimes longer.
 
 ```
 1. set protocol       20 02                       ISO-TP
-2. set rx filter      22 00  <rxId 4 bytes>      response id of the ECU
-3. set tx id          22 01  <txId 4 bytes>      request id of the ECU
-4. extended session   31-len 10 03               → 50 03
+2. set rx filter      22 00  <rxId LE, 4 bytes>   response id of the ECU (77E → 7E 07 00 00)
+3. set tx id          22 01  <txId LE, 4 bytes>   request id of the ECU (714 → 14 07 00 00)
+4. extended session   21-len 10 03               → 50 03
 5. tester present     3E 00 (every 2 s)          → 7E 00
 ```
 

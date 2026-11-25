@@ -453,16 +453,18 @@ final class LevelControlService: ObservableObject {
             self.ecu.txId = self.profile.txId
             self.ecu.rxId = self.profile.rxId
 
-            let ident = await self.ecu.identification()
-            self.ecuOpen = ident.ok
-            lines.append("22 F1 87 → " + ident.detail)
-
+            // Same order as the Android client: open the session first, then read.
             do {
                 let session = try await self.ecu.send([0x10, 0x03])
                 lines.append("10 03 → " + session.hex)
             } catch {
                 lines.append("10 03 → " + ECUConnection.short(error))
             }
+
+            let ident = await self.ecu.identification()
+            self.ecuOpen = ident.ok
+            lines.append("22 F1 87 → " + ident.detail)
+
             do {
                 let alive = try await self.ecu.send([0x3E, 0x00])
                 lines.append("3E 00 → " + alive.hex)
@@ -510,6 +512,7 @@ final class LevelControlService: ObservableObject {
                                                     width: candidate.width)
                     self.ecu.txId = candidate.tx
                     self.ecu.rxId = candidate.rx
+                    _ = try? await self.ecu.send([0x10, 0x03], retries: 0)
                     let ident = await self.ecu.identification()
                     if ident.ok {
                         lines.append("\(label) ✓ \(ident.detail)")

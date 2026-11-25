@@ -252,12 +252,14 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         }
     }
 
-    /// `width` is how many bytes the 0x22 ioctl expects per id. Four works on the
-    /// adapters tested so far; two is offered because some firmware builds take the
-    /// bare 11-bit id instead.
-    func setCAN(tx: UInt32, rx: UInt32, width: Int = 4) async throws {
-        _ = try await exchange([0x22, 0x00] + Self.idBytes(rx, width: width), kind: .ioCtl)
-        _ = try await exchange([0x22, 0x01] + Self.idBytes(tx, width: width), kind: .ioCtl)
+    /// `width` is how many bytes the 0x22 ioctl carries per id. Four is what the
+    /// Android client uses, and the bytes are **little-endian**: `Converter.g()`
+    /// builds `(id >> 0), (id >> 8), (id >> 16), (id >> 24)`. A 29-bit id sets bit
+    /// 31 (`id | 0x80000000`) before it is written, the same way
+    /// `ConnectToUdsExtendedUC` does.
+    func setCAN(tx: UInt32, rx: UInt32, width: Int = 4, extended: Bool = false) async throws {
+        _ = try await exchange([0x22, 0x00] + Self.idBytes(rx, width: width, extended: extended), kind: .ioCtl)
+        _ = try await exchange([0x22, 0x01] + Self.idBytes(tx, width: width, extended: extended), kind: .ioCtl)
     }
 
     func uds(_ payload: [UInt8], timeout: TimeInterval = 5) async throws -> [UInt8] {
@@ -266,9 +268,15 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         return try await exchange(frame, kind: .command, timeout: timeout)
     }
 
-    static func idBytes(_ id: UInt32, width: Int = 4) -> [UInt8] {
-        if width == 2 { return [UInt8((id >> 8) & 0xFF), UInt8(id & 0xFF)] }
-        return [UInt8((id >> 24) & 0xFF), UInt8((id >> 16) & 0xFF), UInt8((id >> 8) & 0xFF), UInt8(id & 0xFF)]
+    /// Little-endian, because that is the only order the adapter has ever been
+    /// shown to accept. The previous big-endian order made `0x77E` go out as
+    /// `00 00 07 7E`, so the adapter filtered on the wrong id, heard nothing and
+    /// answered every UDS request with `21 FE` (`RESULT_NOT_CONNECTED`).
+    static func idBytes(_ id: UInt32, width: Int = 4, extended: Bool = false) -> [UInt8] {
+        let value = extended ? (id | 0x8000_0000) : id
+        if width == 2 { return [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF)] }
+        return [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF),
+                UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)]
     }
 
     // MARK: Internals
