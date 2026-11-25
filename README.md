@@ -255,8 +255,14 @@ Inner commands:
 > 22 01 14 07 00 00
 < 22 00
 > 21 02 00 10 03
-< 21 00 02 00 50 03
+< 21 00                                         ← ACK: request is on the bus
+< 21 00 06 00 50 03 00 32 01 F4                ← the module's answer
 ```
+
+Every UDS request gets **two** frames back: a bare `21 00` ACK, then the response. They can arrive
+in the same notification or in separate ones, split at arbitrary boundaries. Treating the bare
+`21 00` as an empty answer abandons the wait, and the real reply then shows up as unsolicited —
+which looks exactly like "the module is silent" even though it answered.
 
 The id bytes are **little-endian**, exactly what `Converter.g()` builds in the Android client:
 `0x77E → 7E 07 00 00`, `0x714 → 14 07 00 00`. A 29-bit id sets bit 31 first
@@ -283,6 +289,8 @@ What crosses the BLE link for the last one — one key byte, XORed payload, CRC,
 | `20 <proto>` | host → adapter | select transport |
 | `20 <err>` | adapter → host | protocol set result |
 | `21 <lo> <hi> <uds>` | host → adapter | UDS request |
+| `21 00` | adapter → host | ACK only: request reached the bus, the answer follows in its own frame |
+| `21 <err>` | adapter → host | negative result, no length field follows |
 | `21 <err> <lo> <hi> <data>` | adapter → host | UDS response |
 | `22 00 <id4>` | host → adapter | set CAN rx filter (id little-endian) |
 | `22 01 <id4>` | host → adapter | set CAN tx id (id little-endian) |
@@ -643,12 +651,14 @@ Every decoded reply is logged as `< …`. The adapter's own error byte is the se
 | `< 08 00 03` | generation 3 — the link works, the question is now the bus |
 | `< 20 00` | protocol set, no error |
 | `< 21 FE …` | `RESULT_NOT_CONNECTED` — the adapter is not connected to a bus. Ignition/key on, correct CAN pins, then try `Hitta CAN-id`. |
-| `< 21 00` | request reached the adapter, the module returned no data (wrong session, or the module ignores that id) |
+| `< 21 00` alone | ACK only. The answer follows in the next frame; the app keeps waiting. |
+| `< 21 00 06 00 50 03 …` | the real UDS answer (`50 03` = positive response to `10 03`) |
 | `< 21 01 …` | `RESULT_TIMEOUT` — the adapter sent the request but nothing came back |
 | `< 22 00` | ioctl accepted (CAN filter/transmit id) |
 
-`21` replies with an error byte and no length are complete answers, not truncated ones — the app
-shows them at once instead of waiting for bytes that never come.
+A reply that carries an error byte and no length (`21 FE`, `21 01`) is a complete answer and is
+surfaced at once. A bare `21 00` is **not** an answer — it is the ACK that precedes every response,
+and dropping it is what lets a silent-looking module suddenly work.
 
 ---
 

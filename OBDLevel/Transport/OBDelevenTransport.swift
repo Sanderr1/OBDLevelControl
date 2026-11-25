@@ -160,6 +160,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     /// Source of truth for the log; `log` is the snapshot SwiftUI renders.
     private var logLines: [String] = []
+    private var flushPending = false
 
     /// Runs `body` holding the shared state. Recursive, because a frame that
     /// arrives while the parser is already running must not deadlock.
@@ -213,12 +214,30 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     func note(_ line: String) {
-        let snapshot: [String] = sync {
+        sync {
             logLines.append(line)
             if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
-            return logLines
         }
-        ui {
+        scheduleLogFlush()
+    }
+
+    /// Publishing every received byte straight into `@Published log` re-rendered
+    /// the whole screen dozens of times per second - that is what made the app
+    /// feel frozen while a scan was running. Batch to at most ~7 updates per
+    /// second; the last line is never lost, only delayed by up to 150 ms.
+    private func scheduleLogFlush() {
+        let schedule: Bool = sync {
+            if flushPending { return false }
+            flushPending = true
+            return true
+        }
+        guard schedule else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            let snapshot: [String] = self.sync {
+                self.flushPending = false
+                return self.logLines
+            }
             // A snapshot captured a moment earlier must never replace a newer one.
             if snapshot.count >= self.log.count { self.log = snapshot }
         }
@@ -701,14 +720,17 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                     deliver(.command, [], err)
                     continue
                 }
-                guard rx.count >= 4 else {
-                    // `21 00` with nothing after it: the request reached the
-                    // adapter, the module returned no data. Answering with an
-                    // empty payload beats waiting for bytes that never come.
+                if rx.count == 2 {
+                    // Bare `21 00` is the adapter's ACK: the request reached the
+                    // bus and the module's answer follows in its own frame. It is
+                    // not an empty answer. Treating it as one abandoned the wait,
+                    // and the real reply then arrived as "osoliciterat" - which is
+                    // exactly why module 34 looked silent while it was answering
+                    // (10 03 -> 50 03, 3E 00 -> 7E 00).
                     rx.removeFirst(2)
-                    deliver(.command, [], 0)
                     continue
                 }
+                guard rx.count >= 4 else { return }
                 let len = Int(rx[2]) | (Int(rx[3]) << 8)
                 guard rx.count >= 4 + len else { return }
                 let payload = Array(rx[4..<(4 + len)])

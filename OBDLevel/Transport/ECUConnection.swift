@@ -75,10 +75,10 @@ final class ECUConnection {
     // MARK: Core
 
     @discardableResult
-    func send(_ payload: [UInt8], retries: Int = 3) async throws -> [UInt8] {
+    func send(_ payload: [UInt8], retries: Int = 3, timeout: TimeInterval = 5) async throws -> [UInt8] {
         var attempt = 0
         while true {
-            let response = try await transport.uds(payload)
+            let response = try await transport.uds(payload, timeout: timeout)
 
             if response.count >= 3, response[0] == 0x7F {
                 let code = response[2]
@@ -102,8 +102,8 @@ final class ECUConnection {
 
     // MARK: Data
 
-    func readDID(_ did: UInt16) async throws -> [UInt8] {
-        let response = try await send([0x22, UInt8(did >> 8), UInt8(did & 0xFF)])
+    func readDID(_ did: UInt16, timeout: TimeInterval = 5) async throws -> [UInt8] {
+        let response = try await send([0x22, UInt8(did >> 8), UInt8(did & 0xFF)], timeout: timeout)
         guard response.count >= 3, response[0] == 0x62 else {
             throw OBDError.badResponse(response.hex)
         }

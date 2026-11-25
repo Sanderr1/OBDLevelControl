@@ -7,6 +7,7 @@ struct OverviewView: View {
 
     @State private var autoRefresh = false
     @State private var pendingVent: VentTarget?
+    @State private var showMore = false
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -17,9 +18,9 @@ struct OverviewView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            heightsSection
             rideSection
-            controlsSection
+            heightsSection
+            moreSection
         }
         .onReceive(ticker) { _ in
             guard autoRefresh, !demo.enabled, transport.ready, !service.busy else { return }
@@ -39,6 +40,78 @@ struct OverviewView: View {
         } message: {
             Text("Bilen rör sig. Håll dig borta från hjulhusen och ha batteriladdaren inkopplad.")
         }
+    }
+
+    // MARK: Raise / lower - the one thing this app is for
+
+    private var rideSection: some View {
+        VStack(spacing: 10) {
+            SectionHeading(title: "Höj & sänk", trailing: demo.enabled ? "Simulering" : "Live")
+
+            Card {
+                HStack(spacing: 8) {
+                    ActionButton(title: "Höj", enabled: bothEnabled(up: true)) {
+                        moveBoth(up: true)
+                    }
+                    ActionButton(title: "Sänk", enabled: bothEnabled(up: false)) {
+                        moveBoth(up: false)
+                    }
+                }
+                .padding(11)
+
+                if service.canStop {
+                    HairLine()
+                    HStack(spacing: 8) {
+                        ActionButton(title: "Stoppa", running: true) {
+                            service.requestStop()
+                        }
+                    }
+                    .padding(11)
+                }
+
+                HairLine()
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Båda axlarna")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Text(rideStatus)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+
+            if !demo.enabled {
+                Text("En tryckning kör fram först, sedan bak.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 2)
+            }
+        }
+    }
+
+    private func bothEnabled(up: Bool) -> Bool {
+        if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+        let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
+        return !service.busy && roles.allSatisfy { service.hasRoutine($0) }
+    }
+
+    private func moveBoth(up: Bool) {
+        if demo.enabled {
+            demo.lift(.front, up: up)
+            demo.lift(.rear, up: up)
+        } else {
+            Task { await service.moveBoth(up: up) }
+        }
+    }
+
+    private var rideStatus: String {
+        if demo.enabled { return demo.ventStatus }
+        return service.statusLine.isEmpty ? "Redo." : service.statusLine
     }
 
     // MARK: Heights
@@ -90,89 +163,75 @@ struct OverviewView: View {
         !demo.enabled && transport.ready && !service.busy
     }
 
-    // MARK: Quick raise / lower
+    // MARK: Everything else, folded away
 
-    private var rideSection: some View {
-        VStack(spacing: 10) {
-            SectionHeading(title: "Höj & sänk", trailing: demo.enabled ? "Simulering" : "Live")
-
-            Card {
-                HStack(spacing: 8) {
-                    ActionButton(title: "Höj", enabled: bothEnabled(up: true)) {
-                        moveBoth(up: true)
-                    }
-                    ActionButton(title: "Sänk", enabled: bothEnabled(up: false)) {
-                        moveBoth(up: false)
-                    }
-                }
-                .padding(11)
-
-                if service.canStop {
+    private var moreSection: some View {
+        Card {
+            DisclosureGroup(isExpanded: $showMore) {
+                VStack(spacing: 0) {
                     HairLine()
-                    HStack(spacing: 8) {
-                        ActionButton(title: "Stoppa", running: true) {
-                            service.requestStop()
+
+                    ForEach([Axle.front, Axle.rear], id: \.self) { axle in
+                        if axle == .rear { HairLine() }
+                        HStack(spacing: 8) {
+                            Text(axle.heading)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Palette.ink)
+                                .frame(width: 46, alignment: .leading)
+
+                            ActionButton(title: "Höj", enabled: rideEnabled(axle, up: true)) {
+                                ride(axle, up: true)
+                            }
+                            ActionButton(title: "Sänk", enabled: rideEnabled(axle, up: false)) {
+                                ride(axle, up: false)
+                            }
+                        }
+                        .padding(11)
+                    }
+
+                    HairLine()
+                    SwitchRow(title: "Nivåreglering",
+                              detail: levelOn ? "På" : "Av",
+                              isOn: Binding(get: { levelOn }, set: { setLevel($0) }))
+
+                    HairLine()
+                    HStack(spacing: 6) {
+                        ForEach(VentTarget.allCases, id: \.self) { target in
+                            ActionButton(title: target.buttonTitle,
+                                         running: isVentRunning(target),
+                                         enabled: ventEnabled(target)) {
+                                triggerVent(target)
+                            }
                         }
                     }
                     .padding(11)
-                }
 
-                HairLine()
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Båda axlarna · fram först, sedan bak")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.ink)
-                    Text(rideStatus)
+                    HairLine()
+                    Text(controlStatus)
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-            }
-
-            Card {
-                ForEach([Axle.front, Axle.rear], id: \.self) { axle in
-                    if axle == .rear { HairLine() }
-                    HStack(spacing: 8) {
-                        Text(axle.heading)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Palette.ink)
-                            .frame(width: 46, alignment: .leading)
-
-                        ActionButton(title: "Höj", enabled: rideEnabled(axle, up: true)) {
-                            ride(axle, up: true)
-                        }
-                        ActionButton(title: "Sänk", enabled: rideEnabled(axle, up: false)) {
-                            ride(axle, up: false)
-                        }
-                    }
-                    .padding(11)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.blue)
+                    Text("Fler kontroller")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Spacer(minLength: 8)
+                    Text(levelOn ? "Nivåreglering på" : "Axel för axel · luftning")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.muted)
+                        .lineLimit(1)
                 }
             }
-
-            if !demo.enabled {
-                Text("En tryckning på Höj/Sänk kör fram och bak i tur och ordning. Korten under styr en axel i taget. Rutinerna mappas under Inställningar → Funktionsmappning; omappade knappar är avstängda.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 2)
-            }
-        }
-    }
-
-    private func bothEnabled(up: Bool) -> Bool {
-        if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
-        let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
-        return !service.busy && roles.allSatisfy { service.hasRoutine($0) }
-    }
-
-    private func moveBoth(up: Bool) {
-        if demo.enabled {
-            demo.lift(.front, up: up)
-            demo.lift(.rear, up: up)
-        } else {
-            Task { await service.moveBoth(up: up) }
+            .tint(Palette.blue)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
         }
     }
 
@@ -195,53 +254,6 @@ struct OverviewView: View {
             demo.lift(axle, up: up)
         } else if let action = service.action(for: rideRole(axle, up: up)) {
             Task { await service.runAction(action) }
-        }
-    }
-
-    private var rideStatus: String {
-        if demo.enabled { return demo.ventStatus }
-        return service.statusLine.isEmpty ? "Redo." : service.statusLine
-    }
-
-    // MARK: Controls
-
-    private var controlsSection: some View {
-        VStack(spacing: 10) {
-            SectionHeading(title: "Fjädringskontroller", trailing: demo.enabled ? "Simulering" : "Live")
-
-            Card {
-                SwitchRow(title: "Nivåreglering",
-                          detail: levelOn ? "På" : "Av",
-                          isOn: Binding(get: { levelOn }, set: { setLevel($0) }))
-                HairLine()
-                HStack(spacing: 6) {
-                    ForEach(VentTarget.allCases, id: \.self) { target in
-                        ActionButton(title: target.buttonTitle,
-                                     running: isVentRunning(target),
-                                     enabled: ventEnabled(target)) {
-                            triggerVent(target)
-                        }
-                    }
-                }
-                .padding(.horizontal, 11)
-                .padding(.top, 10)
-                HairLine()
-                    .padding(.top, 10)
-                Text(controlStatus)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-            }
-
-            if !demo.enabled {
-                Text("Luftning kräver att nivåregleringen är avstängd. RID:n mappas under Inställningar → Funktionsmappning.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Palette.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 2)
-            }
         }
     }
 

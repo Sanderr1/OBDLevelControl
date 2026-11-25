@@ -617,7 +617,7 @@ final class LevelControlService: ObservableObject {
             for i in 0..<count {
                 let did = start &+ UInt16(i)
                 self.autoProgress = String(format: "%04X  (%d/%d)", did, i + 1, count)
-                if let data = try? await self.ecu.readDID(did), !data.isEmpty {
+                if let data = try? await self.ecu.readDID(did, timeout: 1.2), !data.isEmpty {
                     self.discoveredDIDs.append(String(format: "%04X: %@", did, data.hex))
                     if self.discoveredDIDs.count > 300 {
                         self.discoveredDIDs.removeFirst(self.discoveredDIDs.count - 300)
@@ -759,7 +759,7 @@ final class LevelControlService: ObservableObject {
         var out: [Double?] = []
         for channel in profile.channels.prefix(4) {
             guard channel.did != 0,
-                  let data = try? await ecu.readDID(channel.did) else {
+                  let data = try? await ecu.readDID(channel.did, timeout: 3) else {
                 out.append(nil)
                 continue
             }
@@ -873,7 +873,7 @@ final class LevelControlService: ObservableObject {
                     continue
                 }
                 do {
-                    let data = try await self.ecu.readDID(channel.did)
+                    let data = try await self.ecu.readDID(channel.did, timeout: 2)
                     let value = channel.decode(data)
                     out.append(HeightReading(name: channel.name,
                                              did: channel.did,
@@ -1106,7 +1106,7 @@ final class LevelControlService: ObservableObject {
             for i in 0..<count {
                 let did = start &+ UInt16(i)
                 do {
-                    let data = try await self.ecu.readDID(did)
+                    let data = try await self.ecu.readDID(did, timeout: 1.5)
                     guard !data.isEmpty else { continue }
                     let line = String(format: "%04X: %@", did, data.hex)
                     self.discoveredDIDs.append(line)
