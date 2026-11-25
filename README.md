@@ -50,7 +50,7 @@ with jadx. Nothing here is guessed.
 | Battery voltage channel | works — DID found by the automatic search |
 | Automatic DID discovery (`22` probing + scaling guesses) | works, ranges configurable |
 | Automatic RID discovery (`31 03` only, never starts anything) | works |
-| Quick raise / lower buttons | works once the four roles are mapped |
+| Quick raise / lower buttons | works — whole-car basic settings, `31 01 03DD` / `31 01 03E0` |
 | Identify a routine by measuring (`Mät & mappa`) | works — runs 8 s, measures the corners, assigns the role |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
@@ -420,11 +420,27 @@ Result payload after `71 03 <ridHi> <ridLo>`:
 | `03` | finished, error |
 
 `runRoutine()` in `ECUConnection` starts, polls until status is `00/02/03`, and gives up after
-90 s. While polling, NRC `0x23` (`routineNotComplete`) is treated as "still running", not an error.
+75 s for a level move (25 s for a switch). While polling, NRC `0x23` (`routineNotComplete`) is
+treated as "still running", not an error. The status byte is the **fifth** byte of
+`71 03 <ridHi> <ridLo> <status> …`; the fourth is the low byte of the RID.
 
 Some routines take parameters. In the Android app, `GetBasicSettingRequestParamUC` builds a
 parameter block for those — e.g. calibration routines want the measured heights typed in. Wire
 those into `RoutineAction.parameters` (raw bytes) when you find one that needs them.
+
+VW basic settings use a fixed three-byte option record from the ODX table
+`TAB_RoutiContrBasicSetti`: `04 00 00` (`DOP_TEXTTABLEVWCommoRoutiEntryOptioBasicSetti` codes it as
+*Default Parameter Value*). So a start looks like:
+
+```
+> 31 01 03 DD 04 00 00
+< 71 01 03 DD
+> 31 03 03 DD            every ~400 ms
+< 71 03 03 DD 01         running
+< 71 03 03 DD 02         finished
+```
+
+The app sends that record for every known routine in module 34.
 
 Routines that need the **hood open** are gated by the ECU, not the app: the original client reads
 a flag first (`isPopTheHoodRequired`) and disables the button. If yours returns NRC `0x22`,
@@ -552,6 +568,29 @@ on purpose: `1308` activations of the exhaust valve, `1309` car-jack mode, `220D
 (a bit field, not a number), `282A` Audi drive select (an enum). *Compressor temperature* sits
 below them in the same list — its DID was not visible, so that channel still says `0000` until you
 run the scan or type it in.
+
+### Basic settings in module 34
+
+The routine table in `EV_AirSuspe` 003024 (`TAB_RoutiContrBasicSetti`, 30 rows) gives these RIDs.
+They ship in `LevelProfile.knownActions`, so both a fresh install and an upgraded profile have them
+without scanning:
+
+| Function | RID |
+|---|---|
+| Höj till högläge (`Go_to_high_level_and_deactivate_self-levelling`) | `03DD` |
+| Sänk till normalnivå (`Go_to_normal_level_and_deactivate_self-levelling_permanent`) | `03E0` |
+| Höj fram (`…front_axle_charging`) | `03CE` |
+| Sänk fram (`…front_axle_bleeding`) | `03CB` |
+| Höj bak (`…rear_axle_charging`) | `03CF` |
+| Sänk bak (`…rear_axle_bleeding`) | `03CC` |
+| Nivåreglering av (`Self-levelling_suspension_deactivation`) | `03D4` |
+| Nivåreglering på (`Self-levelling_suspension_activation`) | `03C8` |
+| Fyll behållare (`Accumulator_charging`) | `03CD` |
+| Lufta behållare (`Accumulator_bleeding`) | `03CA` |
+
+Every one uses the option record `04 00 00`. *Vent fram* / *Vent bak* are the same bleeding
+routines as *Sänk fram* / *Sänk bak*. The module ODX contains no `SECURITY-REF`, so basic settings
+need no security access. A `31 03` scan is still useful for routines outside this table.
 
 ### Automatically
 
@@ -715,9 +754,12 @@ either talks to the adapter or, in demo mode, to a local simulation.
 
 **Översikt**
 - Four wheel heights in a 2×2 grid. `Läs nu` reads every channel; `Auto 2 s` repeats it.
-- **Höj & sänk** — the quick controls: `Höj` / `Sänk` per axle, one tap, running the mapped
-  routine. The same card gets a `Stoppa` button while anything is running, which sends `31 02` on
-  the next poll instead of waiting out the routine.
+- **Höj & sänk** — the quick controls. `Höj` runs `31 01 03DD 04 00 00` (whole car to high level),
+  `Sänk` runs `31 01 03E0 04 00 00` (normal level) and then `31 01 03C8 04 00 00` to switch
+  self-levelling back on. One tap, both axles. The same card gets a `Stoppa` button while anything
+  is running, which sends `31 02` on the next poll instead of waiting out the routine.
+- The folded *Fler kontroller* card still has per-axle `Höj` / `Sänk` (`03CE`/`03CB`/`03CF`/`03CC`)
+  and the reservoir routines.
 - *Nivåreglering* is a switch. It sends the routine mapped to `Nivåreglering av` / `på` and keeps
   the app's own state, because the ECU does not expose a readable flag.
 - *Vent fram*, *Vent bak*, *Vent båda* are only enabled while level control is off — same
@@ -770,10 +812,12 @@ level control and the value display.
 ### Role mapping
 
 Routine ids are not guesses — but their names are per-car. Instead of hardcoding "vent front is
-RID 0x1234", the app maps ten roles to whatever routines your profile contains:
+RID 0x1234", the app maps twelve roles to whatever routines your profile contains:
 
 | Role | Button |
 |---|---|
+| `raiseHigh` | Höj (both axles) |
+| `lowerNormal` | Sänk (both axles) |
 | `raiseFront` | Höj fram |
 | `lowerFront` | Sänk fram |
 | `raiseRear` | Höj bak |
@@ -786,7 +830,9 @@ RID 0x1234", the app maps ten roles to whatever routines your profile contains:
 | `reservoirVent` | Lufta behållare |
 
 Unmapped buttons are disabled — no accidental `31 01` with RID 0. Profiles created before roles
-existed are migrated once, by name, on first launch.
+existed are migrated once, by name, on first launch. Profiles from B17 and earlier keep their rows
+but get the confirmed RIDs, the `04 00 00` option record and the two whole-car level routines
+filled in on launch (B18).
 
 ---
 
@@ -961,8 +1007,9 @@ This is a diagnostic tool, not a toy. A wrong RID can command a valve or a compr
   session manager on top.
 - **No background operation.** iOS suspends BLE when the app leaves the foreground unless you add
   the bluetooth-central background mode, which this doesn't declare.
-- **Untested on hardware.** Written from the protocol, not from a live car. Expect to adjust
-  TX/RX ids and scaling first, and treat the very first routine run as a test.
+- **B18 not yet confirmed on the car.** BLE, `10 03`, `3E 00` and DID reads answered on the A6 at
+  B16; the whole-car level routines are compiled from the ODX and await their first live test.
+  Treat the first `Höj` / `Sänk` as a test.
 
 ---
 

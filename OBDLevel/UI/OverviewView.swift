@@ -85,7 +85,7 @@ struct OverviewView: View {
             }
 
             if !demo.enabled {
-                Text("En tryckning kör fram först, sedan bak.")
+                Text("Höj går till högläge, Sänk tillbaka till normalnivå.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -96,6 +96,8 @@ struct OverviewView: View {
 
     private func bothEnabled(up: Bool) -> Bool {
         if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+        let role: ActionRole = up ? .raiseHigh : .lowerNormal
+        if service.hasRoutine(role) { return !service.busy }
         let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
         return !service.busy && roles.allSatisfy { service.hasRoutine($0) }
     }

@@ -116,8 +116,8 @@ final class ECUConnection {
         try await send([0x31, 0x01, UInt8(rid >> 8), UInt8(rid & 0xFF)] + parameters)
     }
 
-    func stopRoutine(_ rid: UInt16) async throws -> [UInt8] {
-        try await send([0x31, 0x02, UInt8(rid >> 8), UInt8(rid & 0xFF)])
+    func stopRoutine(_ rid: UInt16, parameters: [UInt8] = []) async throws -> [UInt8] {
+        try await send([0x31, 0x02, UInt8(rid >> 8), UInt8(rid & 0xFF)] + parameters)
     }
 
     func routineResults(_ rid: UInt16) async throws -> [UInt8] {
@@ -133,7 +133,8 @@ final class ECUConnection {
                     shouldStop: (() -> Bool)? = nil,
                     progress: ((String) -> Void)? = nil) async throws -> [UInt8] {
 
-        _ = try await startRoutine(rid, parameters: parameters)
+        let started = try await startRoutine(rid, parameters: parameters)
+        guard started.first == 0x71 else { throw OBDError.badResponse(started.hex) }
         progress?("routine started")
 
         let deadline = Date().addingTimeInterval(maxSeconds)
@@ -155,17 +156,41 @@ final class ECUConnection {
             }
             progress?("results " + last.hex)
 
-            // status byte: 0x00 not active, 0x01 running, 0x02 finished ok, 0x03 finished with error
-            if last.count >= 4 {
-                let status = last[3]
-                if status == 0x00 || status == 0x02 || status == 0x03 {
-                    return last
-                }
-            } else {
-                return last
+            // `71 03 <ridHi> <ridLo> <status> <payload…>`. The status byte is the
+            // fifth byte, not the fourth: the fourth is the low byte of the RID.
+            guard last.count >= 4, last[0] == 0x71 else {
+                throw OBDError.badResponse(last.hex)
             }
+            if last.count < 5 { return last }
+            let status = last[4]
+            // 0x00 not active, 0x01 running, 0x02 finished ok, 0x03 finished with error
+            if status != 0x01 { return last }
         }
+        _ = try? await stopRoutine(rid)
         throw OBDError.timeout
+    }
+
+    // MARK: Output tests
+
+    /// `2F <DID> <control> <data>` — InputOutputControlByIdentifier. The official
+    /// client sends control `03` (short-term adjustment) with the option record,
+    /// and `00` (return control to the ECU) to stop.
+    @discardableResult
+    func outputTest(_ did: UInt16,
+                    control: UInt8 = 0x03,
+                    data: [UInt8] = [],
+                    timeout: TimeInterval = 5) async throws -> [UInt8] {
+        let response = try await send([0x2F, UInt8(did >> 8), UInt8(did & 0xFF), control] + data,
+                                      timeout: timeout)
+        guard response.first == 0x6F else {
+            throw OBDError.badResponse(response.hex)
+        }
+        return response
+    }
+
+    @discardableResult
+    func stopOutputTest(_ did: UInt16) async throws -> [UInt8] {
+        try await outputTest(did, control: 0x00)
     }
 
     // MARK: Security access

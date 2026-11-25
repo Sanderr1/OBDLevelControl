@@ -64,6 +64,8 @@ enum VentTarget: String, CaseIterable, Hashable {
 /// What a routine does. The interface maps buttons to routines through these roles,
 /// so the same RID list works no matter what the ODX pack calls them.
 enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
+    case raiseHigh
+    case lowerNormal
     case raiseFront
     case lowerFront
     case raiseRear
@@ -79,6 +81,8 @@ enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
+        case .raiseHigh: return "Höj till högläge"
+        case .lowerNormal: return "Sänk till normalnivå"
         case .raiseFront: return "Höj fram"
         case .lowerFront: return "Sänk fram"
         case .raiseRear: return "Höj bak"
@@ -202,6 +206,29 @@ struct LevelProfile: Codable {
         KnownDID(name: "Bilhissläge", did: 0x1309, length: 1, scale: 1, unit: nil)
     ]
 
+    /// Every routine in module 34 is a basic setting. The last three bytes are the
+    /// option record from the ODX table row (`DOP_TEXTTABLEVWCommoRoutiEntryOptioBasicSetti`
+    /// codes `040000` as "Default Parameter Value").
+    static let optionRecord: [UInt8] = [0x04, 0x00, 0x00]
+
+    /// RID:s from `TAB_RoutiContrBasicSetti` in EV_AirSuspe_003024.odx, not guessed:
+    /// `0x03DD` goes to high level, `0x03E0` to normal level, and the rest charge or
+    /// bleed one axle. The two level routines already move both axles.
+    static let knownActions: [(role: ActionRole, name: String, rid: UInt16)] = [
+        (.raiseHigh, "Höj till högläge", 0x03DD),
+        (.lowerNormal, "Sänk till normalnivå", 0x03E0),
+        (.raiseFront, "Höj fram", 0x03CE),
+        (.lowerFront, "Sänk fram", 0x03CB),
+        (.raiseRear, "Höj bak", 0x03CF),
+        (.lowerRear, "Sänk bak", 0x03CC),
+        (.ventFront, "Vent fram", 0x03CB),
+        (.ventRear, "Vent bak", 0x03CC),
+        (.levelOff, "Nivåreglering av", 0x03D4),
+        (.levelOn, "Nivåreglering på", 0x03C8),
+        (.reservoirFill, "Fyll behållare", 0x03CD),
+        (.reservoirVent, "Lufta behållare", 0x03CA)
+    ]
+
     static var blank: LevelProfile {
         let battery = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
@@ -210,24 +237,17 @@ struct LevelProfile: Codable {
                           offset: 0, signed: $0.signed, unit: $0.unit)
         }
         channels.append(battery)
+        let actions = knownActions.map {
+            RoutineAction(name: $0.name, rid: $0.rid,
+                          parameters: optionRecord, role: $0.role)
+        }
         return LevelProfile(
             name: "Min bil",
             vehicle: "Luftfjädring · UDS",
             txId: 0x714,
             rxId: 0x77E,
             channels: channels,
-            actions: [
-                RoutineAction(name: "Höj fram", rid: 0x0000, parameters: [], role: .raiseFront),
-                RoutineAction(name: "Sänk fram", rid: 0x0000, parameters: [], role: .lowerFront),
-                RoutineAction(name: "Höj bak", rid: 0x0000, parameters: [], role: .raiseRear),
-                RoutineAction(name: "Sänk bak", rid: 0x0000, parameters: [], role: .lowerRear),
-                RoutineAction(name: "Vent fram", rid: 0x0000, parameters: [], role: .ventFront),
-                RoutineAction(name: "Vent bak", rid: 0x0000, parameters: [], role: .ventRear),
-                RoutineAction(name: "Nivåreglering av", rid: 0x0000, parameters: [], role: .levelOff),
-                RoutineAction(name: "Nivåreglering på", rid: 0x0000, parameters: [], role: .levelOn),
-                RoutineAction(name: "Fyll behållare", rid: 0x0000, parameters: [], role: .reservoirFill),
-                RoutineAction(name: "Lufta behållare", rid: 0x0000, parameters: [], role: .reservoirVent)
-            ],
+            actions: actions,
             battery: battery.id
         )
     }
@@ -344,6 +364,8 @@ final class LevelControlService: ObservableObject {
             }
         }
 
+        applyKnownActions(&profile)
+
         // Every profile gets exactly one battery channel, once.
         if let id = profile.battery, profile.channels.contains(where: { $0.id == id }) { return }
         if let existing = profile.channels.first(where: {
@@ -356,6 +378,27 @@ final class LevelControlService: ObservableObject {
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
         profile.channels.append(channel)
         profile.battery = channel.id
+    }
+
+    /// Fills in the RID:s confirmed by the module ODX without touching anything the
+    /// user has scanned or typed. A profile saved before B18 has the ten old roles
+    /// but `rid: 0`; those rows get the real RID and the option record in place, and
+    /// the two whole-car level routines are appended because they did not exist yet.
+    private static func applyKnownActions(_ profile: inout LevelProfile) {
+        for i in profile.actions.indices {
+            let role = profile.actions[i].role
+            guard profile.actions[i].rid == 0,
+                  let known = knownActions.first(where: { $0.role == role }) else { continue }
+            profile.actions[i].rid = known.rid
+            if profile.actions[i].parameters.isEmpty {
+                profile.actions[i].parameters = optionRecord
+            }
+        }
+        for known in knownActions where known.role == .raiseHigh || known.role == .lowerNormal {
+            guard !profile.actions.contains(where: { $0.role == known.role }) else { continue }
+            profile.actions.append(RoutineAction(name: known.name, rid: known.rid,
+                                                 parameters: optionRecord, role: known.role))
+        }
     }
 
     private func persist() {
@@ -825,6 +868,8 @@ final class LevelControlService: ObservableObject {
     private func matches(role: ActionRole, front: Double?, rear: Double?) -> Bool {
         func moved(_ value: Double?, _ sign: Double) -> Bool { (value ?? 0) * sign >= 5 }
         switch role {
+        case .raiseHigh: return moved(front, 1) && moved(rear, 1)
+        case .lowerNormal: return moved(front, -1) && moved(rear, -1)
         case .raiseFront: return moved(front, 1)
         case .lowerFront, .ventFront: return moved(front, -1)
         case .raiseRear: return moved(rear, 1)
@@ -976,9 +1021,11 @@ final class LevelControlService: ObservableObject {
         stopRequested = false
         canStop = true
         defer { canStop = false }
+        let seconds = Self.maxDuration(for: action.role)
         return await run(action.name) {
             let result = try await self.ecu.runRoutine(action.rid,
                                                        parameters: action.parameters,
+                                                       maxSeconds: seconds,
                                                        shouldStop: { self.stopRequested }) { msg in
                 self.statusLine = "\(action.name): \(msg)"
             }
@@ -986,12 +1033,39 @@ final class LevelControlService: ObservableObject {
         }
     }
 
-    /// Moves both axles on one press. The module has one routine per axle, so the
-    /// second one starts when the first has finished, with a short pause so the car
-    /// settles instead of fighting the valve block. Stoppa cancels between them.
+    /// A level move physically takes tens of seconds, while switching a function on
+    /// or off is quick. The ceiling only exists so a silent ECU cannot hang the app;
+    /// Stoppa still ends a move at once.
+    private static func maxDuration(for role: ActionRole?) -> Double {
+        guard let role else { return 25 }
+        switch role {
+        case .raiseHigh, .lowerNormal, .raiseFront, .lowerFront, .raiseRear, .lowerRear,
+             .ventFront, .ventRear, .reservoirFill, .reservoirVent:
+            return 75
+        case .levelOff, .levelOn:
+            return 25
+        }
+    }
+
+    /// Moves both axles on one press. `0x03DD` and `0x03E0` are whole-car level
+    /// routines, so normally one call is enough. Sänk leaves self-levelling off, so
+    /// `0x03C8` switches it back on afterwards. A profile without those two rows
+    /// falls back to the per-axle charge/bleed pair.
     func moveBoth(up: Bool) async {
+        let role: ActionRole = up ? .raiseHigh : .lowerNormal
+        if let routine = action(for: role), routine.rid != 0 {
+            statusLine = up ? "Höjer till högläge…" : "Sänker till normalnivå…"
+            guard await runAction(routine) else { return }
+            if !up, let on = action(for: .levelOn), on.rid != 0 {
+                statusLine = "Nivåreglering på…"
+                guard await runAction(on) else { return }
+            }
+            statusLine = up ? "Höjt till högläge" : "Sänkt till normalnivå"
+            return
+        }
+
         let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
-        let actions = roles.compactMap { action(for: $0) }
+        let actions = roles.compactMap { action(for: $0) }.filter { $0.rid != 0 }
         guard actions.count == 2 else {
             statusLine = "\(up ? "Höj" : "Sänk") saknar mappad rutin (Inställningar → Funktionsmappning)"
             return
