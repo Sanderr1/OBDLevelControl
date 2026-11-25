@@ -15,6 +15,10 @@ struct SystemView: View {
             systemSection
             reservoirSection
         }
+        .onAppear {
+            guard !demo.enabled, service.ecuOpen, !service.busy else { return }
+            Task { await service.readAllChannels() }
+        }
     }
 
     // MARK: Battery
@@ -110,6 +114,12 @@ struct SystemView: View {
                                   text: channelText(channel),
                                   unit: channel.unit ?? "")
                     }
+                }
+            }
+
+            if !demo.enabled {
+                ActionButton(title: "Läs systemvärden", enabled: !service.busy) {
+                    Task { await service.readAllChannels() }
                 }
             }
         }

@@ -136,6 +136,18 @@ struct RoutineAction: Codable, Identifiable, Hashable {
     var role: ActionRole?
 }
 
+/// A measuring value that the EV_AirSuspe unit (Audi A6 C7 air suspension) lists.
+/// The numbers are DIDs from the module's own live-data list and do not change;
+/// only the labels come from the ODX pack.
+struct KnownDID {
+    let name: String
+    let did: UInt16
+    let length: Int
+    let scale: Double
+    let unit: String?
+    var signed: Bool = false
+}
+
 struct LevelProfile: Codable {
     var name: String
     var vehicle: String?
@@ -145,35 +157,65 @@ struct LevelProfile: Codable {
     var actions: [RoutineAction]
     /// Which channel shows the battery voltage. Optional so older profiles still decode.
     var battery: UUID?
+    /// Bytes per CAN id in the adapter's 0x22 ioctl. Nil means the usual four.
+    var idWidth: Int?
 
-    /// The measuring values the EV_AirSuspe unit (Audi A6 C7 air suspension) lists,
-    /// in the order OBDeleven shows them. The numbers are DIDs and do not change;
-    /// only the names come from the ODX pack.
-    static let knownDIDs: [(name: String, did: UInt16, length: Int, scale: Double, unit: String?)] = [
-        ("Vänster fram", 0x258F, 2, 0.1, "mm"),
-        ("Höger fram", 0x2590, 2, 0.1, "mm"),
-        ("Vänster bak", 0x2591, 2, 0.1, "mm"),
-        ("Höger bak", 0x2592, 2, 0.1, "mm"),
-        ("Systemtryck", 0x2B83, 2, 0.01, "bar")
+    /// Live data as the module lists it. Heights first on purpose: the overview reads
+    /// the first four channels and calls them the wheels.
+    static let knownDIDs: [KnownDID] = [
+        KnownDID(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, unit: "mm"),
+
+        KnownDID(name: "Systemtryck", did: 0x2B83, length: 2, scale: 0.01, unit: "bar"),
+        KnownDID(name: "Kompressortemperatur", did: 0x2B84, length: 1, scale: 1, unit: "°C"),
+        KnownDID(name: "Beräknad kompressortemp", did: 0x2B96, length: 2, scale: 0.1, unit: "°C"),
+        KnownDID(name: "Kompressor omgivningstemp", did: 0x2B97, length: 2, scale: 0.1, unit: "°C"),
+
+        KnownDID(name: "Absolut höjd VF", did: 0x2B8E, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Absolut höjd HF", did: 0x2B8F, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Absolut höjd VB", did: 0x2B90, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Absolut höjd HB", did: 0x2B91, length: 2, scale: 0.1, unit: "mm"),
+
+        KnownDID(name: "Avvikelse VF", did: 0x2B8A, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Avvikelse HF", did: 0x2B8B, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Avvikelse VB", did: 0x2B8C, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Avvikelse HB", did: 0x2B8D, length: 2, scale: 0.1, unit: "mm", signed: true),
+
+        KnownDID(name: "Nivåtryck VF", did: 0x1230, length: 2, scale: 0.1, unit: "hPa"),
+        KnownDID(name: "Nivåtryck HF", did: 0x1232, length: 2, scale: 0.1, unit: "hPa"),
+        KnownDID(name: "Nivåtryck VB", did: 0x1234, length: 2, scale: 0.1, unit: "hPa"),
+        KnownDID(name: "Nivåtryck HB", did: 0x1236, length: 2, scale: 0.1, unit: "hPa"),
+
+        KnownDID(name: "Systemstatus", did: 0x2B92, length: 2, scale: 1, unit: nil),
+        KnownDID(name: "Nivåregulator villkor", did: 0x2B93, length: 2, scale: 1, unit: nil),
+        KnownDID(name: "Börvärde nivå", did: 0x2B94, length: 2, scale: 0.1, unit: "mm"),
+
+        KnownDID(name: "Börvärdeavvikelse VF", did: 0x2B98, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Börvärdeavvikelse HF", did: 0x2B99, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Börvärdeavvikelse VB", did: 0x2B9A, length: 2, scale: 0.1, unit: "mm", signed: true),
+        KnownDID(name: "Börvärdeavvikelse HB", did: 0x2B9B, length: 2, scale: 0.1, unit: "mm", signed: true),
+
+        KnownDID(name: "Audi drive select", did: 0x282A, length: 1, scale: 1, unit: nil),
+        KnownDID(name: "Dörrar & luckor", did: 0x220D, length: 1, scale: 1, unit: nil),
+        KnownDID(name: "Bilhissläge", did: 0x1309, length: 1, scale: 1, unit: nil)
     ]
 
     static var blank: LevelProfile {
         let battery = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
+        var channels = knownDIDs.map {
+            HeightChannel(name: $0.name, did: $0.did, length: $0.length, scale: $0.scale,
+                          offset: 0, signed: $0.signed, unit: $0.unit)
+        }
+        channels.append(battery)
         return LevelProfile(
             name: "Min bil",
             vehicle: "Luftfjädring · UDS",
             txId: 0x714,
             rxId: 0x77E,
-            channels: [
-                HeightChannel(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
-                HeightChannel(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
-                HeightChannel(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
-                HeightChannel(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, offset: 0, signed: false, unit: "mm"),
-                HeightChannel(name: "Systemtryck", did: 0x2B83, length: 2, scale: 0.01, offset: 0, signed: false, unit: "bar"),
-                HeightChannel(name: "Kompressortemperatur", did: 0x0000, length: 1, scale: 1, offset: 0, signed: false, unit: "°C"),
-                battery
-            ],
+            channels: channels,
             actions: [
                 RoutineAction(name: "Höj fram", rid: 0x0000, parameters: [], role: .raiseFront),
                 RoutineAction(name: "Sänk fram", rid: 0x0000, parameters: [], role: .lowerFront),
@@ -244,6 +286,8 @@ final class LevelControlService: ObservableObject {
     @Published var autoProgress = ""
     /// The app's own belief about level control. The ECU is not read for this.
     @Published var levelControlEnabled = true
+    /// True once module 34 has actually answered a request, not just when BLE is up.
+    @Published private(set) var ecuOpen = false
     /// Last routine started, so "Stoppa" knows what to abort.
     @Published private(set) var lastAction: RoutineAction?
     /// True only while a routine is actually being started/polled.
@@ -326,15 +370,29 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Connection
 
+    /// Opens the control unit and reports every step. Runs automatically when the
+    /// adapter link comes up, so a BLE connection alone never looks like success.
     func connectECU() async {
+        guard transport.ready else {
+            statusLine = "Ingen adapter ansluten"
+            ecuOpen = false
+            return
+        }
+        ecuOpen = false
+        let width = profile.idWidth ?? 4
         let ok = await run("kopplar upp") {
             self.ecu.txId = self.profile.txId
             self.ecu.rxId = self.profile.rxId
-            try await self.ecu.open()
-            self.statusLine = "Styrenhet öppen"
+            let report = try await self.ecu.open(idWidth: width)
+            self.ecuOpen = report.answered
+            self.statusLine = (report.answered ? "Styrenhet öppen · " : "Modul 34 svarar inte · ")
+                + report.summary
         }
-        guard ok, autoSettings.onConnect, needsAutoConfig else { return }
-        await autoConfigure()
+        guard ok, ecuOpen else { return }
+        if autoSettings.onConnect {
+            applyKnownDIDs(announce: false)
+            await readHeights()
+        }
     }
 
     /// True while any channel still lacks a DID or any routine lacks a RID.
@@ -343,54 +401,189 @@ final class LevelControlService: ObservableObject {
         profile.channels.contains { $0.did == 0 } || profile.actions.contains { $0.rid == 0 }
     }
 
+    /// Called when the BLE link drops, so the header stops claiming the car answers.
+    func handleDisconnect() {
+        ecuOpen = false
+        statusLine = "Adaptern frånkopplad"
+    }
+
     // MARK: Self test
 
     /// Runs the whole ladder and reports where it stops: protocol, CAN ids, generation,
-    /// extended session, tester present.
+    /// extended session, tester present and one real read.
     func runSelfTest() async {
         await run("självtest") {
             var lines: [String] = []
             do {
                 try await self.transport.setProtocol(.isoTP)
                 lines.append("20 02 ok")
-
+            } catch {
+                lines.append("stopp vid 20 02: " + ECUConnection.short(error))
+                self.statusLine = lines.joined(separator: " · ")
+                return
+            }
+            do {
                 let gen = try await self.transport.readGeneration()
                 lines.append("generation \(gen)")
-
-                try await self.transport.setCAN(tx: self.profile.txId, rx: self.profile.rxId)
+            } catch {
+                lines.append("generation: " + ECUConnection.short(error))
+            }
+            do {
+                try await self.transport.setCAN(tx: self.profile.txId,
+                                                rx: self.profile.rxId,
+                                                width: self.profile.idWidth ?? 4)
                 lines.append(String(format: "CAN %03X→%03X ok", self.profile.txId, self.profile.rxId))
+            } catch {
+                lines.append("stopp vid CAN: " + ECUConnection.short(error))
+                self.statusLine = lines.joined(separator: " · ")
+                return
+            }
+            self.ecu.txId = self.profile.txId
+            self.ecu.rxId = self.profile.rxId
 
+            let ident = await self.ecu.identification()
+            self.ecuOpen = ident.ok
+            lines.append("22 F1 87 → " + ident.detail)
+
+            do {
                 let session = try await self.ecu.send([0x10, 0x03])
                 lines.append("10 03 → " + session.hex)
-
+            } catch {
+                lines.append("10 03 → " + ECUConnection.short(error))
+            }
+            do {
                 let alive = try await self.ecu.send([0x3E, 0x00])
                 lines.append("3E 00 → " + alive.hex)
             } catch {
-                lines.append("stopp: " + error.localizedDescription)
+                lines.append("3E 00 → " + ECUConnection.short(error))
+            }
+            if ident.ok, let first = self.profile.channels.first(where: { $0.did != 0 }) {
+                do {
+                    let data = try await self.ecu.readDID(first.did)
+                    lines.append(String(format: "22 %04X → %@", first.did, data.hex))
+                } catch {
+                    lines.append(String(format: "22 %04X → %@", first.did, ECUConnection.short(error)))
+                }
             }
             self.statusLine = lines.joined(separator: " · ")
         }
     }
 
+    // MARK: CAN id probe
+
+    /// Tries the CAN id pairs that a VAG car can use, in both byte widths and both
+    /// directions, and reports what each one answered. Read-only: one 22 F1 87 per try.
+    func probeCANIDs() async {
+        guard transport.ready else {
+            statusLine = "Anslut adaptern först"
+            return
+        }
+        let candidates: [(tx: UInt32, rx: UInt32, width: Int, label: String)] = [
+            (0x714, 0x77E, 4, "Luftfjädring 34"),
+            (0x714, 0x77E, 2, "Luftfjädring 34, 2 byte"),
+            (0x77E, 0x714, 4, "34 omvänd"),
+            (0x77E, 0x714, 2, "34 omvänd, 2 byte"),
+            (0x710, 0x77A, 4, "Gateway 19"),
+            (0x7E0, 0x7E8, 4, "Motor 01"),
+            (0x720, 0x78A, 4, "Instrument 17")
+        ]
+        await run("letar CAN-id") {
+            var lines: [String] = []
+            var winner: (tx: UInt32, rx: UInt32, width: Int)?
+            for candidate in candidates {
+                let label = String(format: "%03X→%03X", candidate.tx, candidate.rx)
+                do {
+                    try await self.transport.setProtocol(.isoTP)
+                    try await self.transport.setCAN(tx: candidate.tx, rx: candidate.rx,
+                                                    width: candidate.width)
+                    self.ecu.txId = candidate.tx
+                    self.ecu.rxId = candidate.rx
+                    let ident = await self.ecu.identification()
+                    if ident.ok {
+                        lines.append("\(label) ✓ \(ident.detail)")
+                        if winner == nil {
+                            winner = (candidate.tx, candidate.rx, candidate.width)
+                        }
+                    } else {
+                        lines.append("\(label) ✗ \(ident.detail)")
+                    }
+                } catch {
+                    lines.append("\(label) ✗ " + ECUConnection.short(error))
+                }
+            }
+            if let winner {
+                self.profile.txId = winner.tx
+                self.profile.rxId = winner.rx
+                self.profile.idWidth = winner.width
+                self.ecu.txId = winner.tx
+                self.ecu.rxId = winner.rx
+                self.ecuOpen = true
+                self.statusLine = "Hittade: " + lines.joined(separator: " · ")
+            } else {
+                self.ecuOpen = false
+                self.statusLine = "Inget svar alls: " + lines.joined(separator: " · ")
+            }
+        }
+    }
+
     // MARK: Automatic configuration
 
-    /// Writes the known DID map for EV_AirSuspe 003024 into the profile.
-    /// These come from the measuring values the module itself lists — the numbers are
-    /// fixed for that control unit, only the labels come from the ODX pack.
-    func applyKnownDIDs() {
+    /// Rebuilds the channel list from the module's own live-data ids, reusing the
+    /// channels that already exist so ids, scales and saved values survive.
+    func applyKnownDIDs(overwrite: Bool? = nil, announce: Bool = true) {
+        let replace = overwrite ?? autoSettings.overwriteExisting
         var updated = profile
         var lines: [String] = []
-        for (index, known) in LevelProfile.knownDIDs.enumerated() where index < updated.channels.count {
-            updated.channels[index].did = known.did
-            updated.channels[index].length = known.length
-            updated.channels[index].scale = known.scale
-            updated.channels[index].offset = 0
-            updated.channels[index].signed = false
-            updated.channels[index].unit = known.unit
+        var used = Set<UUID>()
+        var built: [HeightChannel] = []
+
+        for known in LevelProfile.knownDIDs {
+            if let index = updated.channels.firstIndex(where: {
+                $0.did == known.did && !used.contains($0.id)
+            }) {
+                var channel = updated.channels[index]
+                used.insert(channel.id)
+                if replace {
+                    channel.name = known.name
+                    channel.length = known.length
+                    channel.scale = known.scale
+                    channel.offset = 0
+                    channel.signed = known.signed
+                    channel.unit = known.unit
+                }
+                built.append(channel)
+            } else {
+                built.append(HeightChannel(name: known.name, did: known.did,
+                                           length: known.length, scale: known.scale,
+                                           offset: 0, signed: known.signed, unit: known.unit))
+            }
             lines.append(String(format: "%@ %04X", known.name, known.did))
         }
+
+        // Keep anything the user added that is not in the known list, battery included.
+        for channel in updated.channels where !used.contains(channel.id) {
+            built.append(channel)
+        }
+
+        if let id = updated.battery, built.contains(where: { $0.id == id }) {
+            // already kept
+        } else if let existing = built.first(where: {
+            ($0.unit ?? "").uppercased() == "V" || $0.name.lowercased().contains("batteri")
+        }) {
+            updated.battery = existing.id
+        } else {
+            let channel = HeightChannel(name: "Batterispänning", did: 0x0000, length: 2,
+                                        scale: 0.001, offset: 0, signed: false, unit: "V")
+            built.append(channel)
+            updated.battery = channel.id
+        }
+
+        updated.channels = built
         profile = updated
-        statusLine = "DID ifyllda: " + lines.joined(separator: " · ")
+        rebuildReadings()
+        if announce {
+            statusLine = "\(lines.count) DID ifyllda"
+        }
     }
 
     /// One tap: find DIDs that decode to plausible values, then find implemented routines.
@@ -627,10 +820,39 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Heights
 
+    /// The four wheels plus the battery: everything the overview and the battery card
+    /// need on a 2 s refresh. Reading all 30 known ids every tick would take seconds.
+    var fastChannels: [HeightChannel] {
+        var list = wheelChannels
+        if let battery = batteryChannel, !list.contains(where: { $0.id == battery.id }) {
+            list.append(battery)
+        }
+        return list
+    }
+
     func readHeights() async {
-        await run("reading heights") {
+        await read(fastChannels, label: "läser höjder")
+    }
+
+    /// Reads every channel the profile has, including the system values.
+    func readAllChannels() async {
+        await read(profile.channels, label: "läser alla kanaler")
+    }
+
+    private func read(_ channels: [HeightChannel], label: String) async {
+        await run(label) {
+            let wanted = Set(channels.map(\.id))
             var out: [HeightReading] = []
+            var summary: [String] = []
             for channel in self.profile.channels {
+                let previous = self.readings.first { $0.did == channel.did && $0.name == channel.name }
+                guard wanted.contains(channel.id) else {
+                    out.append(previous ?? HeightReading(name: channel.name,
+                                                         did: channel.did,
+                                                         value: nil,
+                                                         raw: channel.did == 0 ? "no DID" : "–"))
+                    continue
+                }
                 guard channel.did != 0 else {
                     out.append(HeightReading(name: channel.name, did: 0, value: nil, raw: "no DID"))
                     continue
@@ -642,16 +864,22 @@ final class LevelControlService: ObservableObject {
                                              did: channel.did,
                                              value: value,
                                              raw: data.hex))
+                    if let value { summary.append(String(format: "%.1f", value)) }
                 } catch {
                     out.append(HeightReading(name: channel.name,
                                              did: channel.did,
                                              value: nil,
-                                             raw: "err \(error.localizedDescription)"))
+                                             raw: "err " + ECUConnection.short(error)))
                 }
             }
             self.readings = out
-            let summary = out.compactMap { $0.value }.map { String(format: "%.1f", $0) }.joined(separator: " / ")
-            self.statusLine = summary.isEmpty ? "no values decoded" : summary
+            self.ecuOpen = self.ecuOpen || out.contains { $0.value != nil }
+            if out.contains(where: { $0.did != 0 && $0.raw.hasPrefix("err") }) {
+                let first = out.first { $0.raw.hasPrefix("err") }
+                self.statusLine = "Fel vid läsning: " + (first?.raw ?? "")
+            } else {
+                self.statusLine = summary.isEmpty ? "Inga värden" : summary.joined(separator: " / ")
+            }
         }
     }
 

@@ -159,9 +159,12 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         return gen
     }
 
-    func setCAN(tx: UInt32, rx: UInt32) async throws {
-        _ = try await exchange([0x22, 0x00] + Self.idBytes(rx), kind: .ioCtl)
-        _ = try await exchange([0x22, 0x01] + Self.idBytes(tx), kind: .ioCtl)
+    /// `width` is how many bytes the 0x22 ioctl expects per id. Four works on the
+    /// adapters tested so far; two is offered because some firmware builds take the
+    /// bare 11-bit id instead.
+    func setCAN(tx: UInt32, rx: UInt32, width: Int = 4) async throws {
+        _ = try await exchange([0x22, 0x00] + Self.idBytes(rx, width: width), kind: .ioCtl)
+        _ = try await exchange([0x22, 0x01] + Self.idBytes(tx, width: width), kind: .ioCtl)
     }
 
     func uds(_ payload: [UInt8], timeout: TimeInterval = 5) async throws -> [UInt8] {
@@ -170,8 +173,9 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         return try await exchange(frame, kind: .command, timeout: timeout)
     }
 
-    static func idBytes(_ id: UInt32) -> [UInt8] {
-        [UInt8((id >> 24) & 0xFF), UInt8((id >> 16) & 0xFF), UInt8((id >> 8) & 0xFF), UInt8(id & 0xFF)]
+    static func idBytes(_ id: UInt32, width: Int = 4) -> [UInt8] {
+        if width == 2 { return [UInt8((id >> 8) & 0xFF), UInt8(id & 0xFF)] }
+        return [UInt8((id >> 24) & 0xFF), UInt8((id >> 16) & 0xFF), UInt8((id >> 8) & 0xFF), UInt8(id & 0xFF)]
     }
 
     // MARK: Internals

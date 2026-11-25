@@ -532,12 +532,42 @@ are your basic settings. Cross-reference the order against what OBDeleven lists 
 2. Then walk `2B00`–`2BFF` and `0100`–`01FF`, which is where VAG puts live values.
 3. Watch each result while pushing on a corner — the four that track your hand are the height sensors.
 
-### From the ODX file
+### Verified live data for EV_AirSuspe 003024
 
-If you want the real thing: pull the ODX file from the Android app's cache
-(`/data/data/com.voltasit.obdeleven/…`, needs root) or intercept the `"ODX"` request. Inside,
-`<ROUTINE ID="…">` and `<DATA-OBJECT-PROP>` give you the ids and the scaling — the same numbers
-you'd otherwise find by scanning.
+Taken from the module's own live-data list, so the numbers are exact. **Kända DID** writes the
+whole set; only the four first are read on the 2-second refresh, the rest live under **System**
+and **Diagnostik**.
+
+| DID | Value | DID | Value |
+|---|---|---|---|
+| `258F` | Höjd VF (wheel house edge) | `2B8E` | Absolut höjd VF |
+| `2590` | Höjd HF | `2B8F` | Absolut höjd HF |
+| `2591` | Höjd VB | `2B90` | Absolut höjd VB |
+| `2592` | Höjd HB | `2B91` | Absolut höjd HB |
+| `2B83` | Systemtryck | `2B8A` | Avvikelse VF |
+| `2B84` | Kompressortemperatur | `2B8B` | Avvikelse HF |
+| `2B96` | Beräknad kompressortemp | `2B8C` | Avvikelse VB |
+| `2B97` | Kompressor omgivningstemp | `2B8D` | Avvikelse HB |
+| `1230` | Nivåtryck VF | `2B92` | Systemstatus |
+| `1232` | Nivåtryck HF | `2B93` | Nivåregulator villkor |
+| `1234` | Nivåtryck VB | `2B94` | Börvärde nivå |
+| `1236` | Nivåtryck HB | `2B98`–`2B9B` | Börvärdeavvikelse per hjul |
+
+Also present, unassigned by default: `220D` doors/lids, `282A` Audi drive select, `1309` car-jack
+mode, `1301`–`1308` valve/compressor counters, `0x1210` calibrated level values, `2B85`–`2B88`
+height sensor PWM, `2B89` MMI status.
+
+### "Inget svar från modul 34"
+
+BLE connected only means the adapter answered. If the app says `Modul 34 svarar inte`, or
+**Testa anslutning** stops before `22 F1 87`:
+
+1. **Inställningar → Hitta CAN-id.** It tries `714→77E` and its common variants, in both 4- and
+   2-byte form, and one read-only `22 F1 87` per candidate. The winner is written to the profile.
+2. If nothing answers, the module is not on the bus you are talking to. Check ignition, that the
+   adapter is fully seated, and that no other app (OBDeleven, Car Scanner) holds the BLE link.
+3. The log in **Diagnostik** shows every `> 21 …` and `< 21 …` frame, so the first failing step is
+   always visible.
 
 ---
 

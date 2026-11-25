@@ -105,9 +105,23 @@ struct SettingsView: View {
 
                 HairLine()
 
+                HStack(spacing: 8) {
+                    ActionButton(title: "Hitta CAN-id",
+                                 enabled: transport.ready && !service.busy) {
+                        Task { await service.probeCANIDs() }
+                    }
+                }
+                .padding(11)
+
+                HairLine()
+
                 ValueRow(title: "Adapter",
                          value: transport.ready ? transport.connectedName : "Ej ansluten",
                          valueColor: transport.ready ? Palette.green : Palette.muted)
+                HairLine()
+                ValueRow(title: "Styrenhet",
+                         value: service.ecuOpen ? "Svarar" : (transport.ready ? "Testa CAN-id" : "-"),
+                         valueColor: service.ecuOpen ? Palette.green : Palette.amber)
             }
         }
     }
@@ -121,7 +135,7 @@ struct SettingsView: View {
 
             Card {
                 SwitchRow(title: "Kör vid anslutning",
-                          detail: "Fyller tomma DID/RID första gången bilen ansluts.",
+                          detail: "Öppnar styrenheten, fyller kända DID och läser höjderna automatiskt.",
                           isOn: $service.autoSettings.onConnect)
                 HairLine()
 

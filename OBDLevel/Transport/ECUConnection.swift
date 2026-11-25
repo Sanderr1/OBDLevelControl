@@ -17,12 +17,59 @@ final class ECUConnection {
 
     // MARK: Setup
 
-    func open(proto: DeviceProtocol = .isoTP) async throws {
+    struct OpenReport {
+        var steps: [String]
+        /// True when the ECU answered at least one request, i.e. the CAN ids are right.
+        var answered: Bool
+        var summary: String { steps.joined(separator: " · ") }
+    }
+
+    /// Sends the ladder that has to work before anything else can: protocol, CAN ids,
+    /// extended session, tester present. Each step is reported instead of swallowed,
+    /// because "connected" at BLE level says nothing about the car answering.
+    @discardableResult
+    func open(proto: DeviceProtocol = .isoTP, idWidth: Int = 4) async throws -> OpenReport {
+        var steps: [String] = []
         try await transport.setProtocol(proto)
-        try await transport.setCAN(tx: txId, rx: rxId)
-        _ = try? await send([0x10, sessionType])
-        _ = try? await send([0x3E, 0x00])
-        transport.note("ECU open tx=\(String(format: "%08X", txId)) rx=\(String(format: "%08X", rxId))")
+        steps.append("20 02 ok")
+
+        try await transport.setCAN(tx: txId, rx: rxId, width: idWidth)
+        steps.append(String(format: "CAN %03X→%03X ok", txId, rxId))
+
+        var answered = false
+        do {
+            let session = try await send([0x10, sessionType])
+            answered = true
+            steps.append("10 03 → " + session.hex)
+        } catch {
+            steps.append("10 03 → " + Self.short(error))
+        }
+        do {
+            let alive = try await send([0x3E, 0x00])
+            answered = true
+            steps.append("3E 00 → " + alive.hex)
+        } catch {
+            steps.append("3E 00 → " + Self.short(error))
+        }
+
+        transport.note("ECU open tx=\(String(format: "%03X", txId)) rx=\(String(format: "%03X", rxId))"
+                       + (answered ? " answers" : " silent"))
+        return OpenReport(steps: steps, answered: answered)
+    }
+
+    /// One read-only request used to tell whether the bus and ids are right.
+    func identification() async -> (ok: Bool, detail: String) {
+        do {
+            let response = try await send([0x22, 0xF1, 0x87])
+            return (response.first == 0x62, response.hex)
+        } catch {
+            return (false, Self.short(error))
+        }
+    }
+
+    static func short(_ error: Error) -> String {
+        if let obd = error as? OBDError { return obd.errorDescription ?? "fel" }
+        return error.localizedDescription
     }
 
     // MARK: Core

@@ -32,6 +32,10 @@ struct DiagnosticsView: View {
                          value: transport.ready ? "Etablerad" : "Ej etablerad",
                          valueColor: transport.ready ? Palette.green : Palette.muted)
                 HairLine()
+                ValueRow(title: "Modul 34 svarar",
+                         value: service.ecuOpen ? "Ja" : "Nej",
+                         valueColor: service.ecuOpen ? Palette.green : Palette.amber)
+                HairLine()
                 ValueRow(title: "Protokoll", value: "UDS · ISO-TP")
                 HairLine()
                 ValueRow(title: "Felkoder", value: "Ej avlästa")
@@ -92,6 +96,12 @@ struct DiagnosticsView: View {
                     }
                     .padding(.horizontal, 13)
                     .padding(.vertical, 10)
+                }
+            }
+
+            if !demo.enabled {
+                ActionButton(title: "Läs alla kanaler", enabled: transport.ready && !service.busy) {
+                    Task { await service.readAllChannels() }
                 }
             }
         }

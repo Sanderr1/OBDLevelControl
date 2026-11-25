@@ -60,6 +60,14 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onChange(of: transport.ready) { _, ready in
+            guard !demo.enabled else { return }
+            if ready {
+                Task { await service.connectECU() }
+            } else {
+                service.handleDisconnect()
+            }
+        }
         .sheet(isPresented: $showLink) {
             LinkSheet()
                 .environmentObject(transport)
@@ -146,12 +154,14 @@ struct AppHeader: View {
 
     private var badgeText: String {
         if demo.enabled { return "DEMO" }
-        return transport.ready ? "LIVE" : "OFFLINE"
+        if !transport.ready { return "OFFLINE" }
+        return service.ecuOpen ? "LIVE" : "BLE"
     }
 
     private var badgeColor: Color {
         if demo.enabled { return Palette.amber }
-        return transport.ready ? Palette.green : Palette.amber
+        if !transport.ready { return Palette.amber }
+        return service.ecuOpen ? Palette.green : Palette.amber
     }
 
     private var dotColor: Color {
@@ -161,7 +171,9 @@ struct AppHeader: View {
 
     private var stateText: String {
         if demo.enabled { return "Demoläge" }
-        if transport.ready { return "Ansluten" }
+        if transport.ready {
+            return service.ecuOpen ? "Ansluten" : "Ansluten · modul 34 svarar inte"
+        }
         return transport.statusText == "scanning" ? "Söker adapter …" : "Ej ansluten"
     }
 
