@@ -616,7 +616,12 @@ BLE connected only means the adapter answered. If the app says `Modul 34 svarar 
 5. **Diagnostik → Länk** shows what FFE1 actually advertises (`write`, `writeNoResp`, `notify`) and
    which wire form answered: `ramad` (0x0F…0x04) or `rå` (bytes as-is). The app tries the framed
    form first and falls back to raw once per connection.
-6. If a Bluetooth pairing request appears on iOS, accept it — an unencrypted write is dropped
+6. **Diagnostik → Prova länklägen** is the one to press when the log shows `>` lines but no `rx`
+   lines at all. It sends the same `08` four times — framed/rå × write/`writeNoResp` — and stops at
+   the first combination that answers. The winner is stored in `UserDefaults` (`link.form`,
+   `link.style`) and shown in **Länkläge**, so the next connect goes straight to it. It also runs
+   automatically on every connect while no mode has been found.
+7. If a Bluetooth pairing request appears on iOS, accept it — an unencrypted write is dropped
    silently by some firmware builds.
 
 ---

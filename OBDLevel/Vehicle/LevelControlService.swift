@@ -409,6 +409,15 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Self test
 
+    /// Sweeps framing × write type against `08` and remembers the combination that
+    /// answers, so the next connect starts there instead of timing out first.
+    func probeLink() async {
+        await run("prova länklägen") {
+            let text = await self.transport.probeLink()
+            self.statusLine = text
+        }
+    }
+
     /// Runs the whole ladder and reports where it stops. The first three steps talk
     /// to the adapter itself and need no car, so they prove whether the wire works
     /// at all; the rest needs the right CAN ids.

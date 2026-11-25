@@ -75,6 +75,13 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     enum Kind: Equatable { case proto, command, ioCtl, generation, device(UInt8) }
 
+    /// How bytes are framed on the way out, and how the write is declared to iOS.
+    /// `auto` is the normal path. The explicit values are what
+    /// `Prova alla länklägen` leaves behind once one combination has answered, so
+    /// the next connect goes straight to it instead of timing out first.
+    enum WireForm: String { case auto, framed, raw }
+    enum WriteStyle: String { case auto, withResponse, withoutResponse }
+
     static let svcData = CBUUID(string: "FFE0")
     static let chrData = CBUUID(string: "FFE1")
     static let svcCtrl = CBUUID(string: "FFE3")
@@ -87,6 +94,13 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     @Published private(set) var charInfo = ""
     /// Which wire form the adapter answered in: "ramad" or "rå".
     @Published private(set) var wireMode = "ramad"
+    /// What the app is set to send. `auto` until something has answered.
+    @Published var wireForm: WireForm = .auto {
+        didSet { UserDefaults.standard.set(wireForm.rawValue, forKey: "link.form") }
+    }
+    @Published var writeStyle: WriteStyle = .auto {
+        didSet { UserDefaults.standard.set(writeStyle.rawValue, forKey: "link.style") }
+    }
     /// 1 = classic SPP dongle, 2 = BLE, 3 = Pro 3 generation
     @Published private(set) var generation: UInt8?
     @Published var devices: [Discovered] = []
@@ -122,6 +136,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        if let raw = UserDefaults.standard.string(forKey: "link.form"),
+           let form = WireForm(rawValue: raw) { wireForm = form }
+        if let raw = UserDefaults.standard.string(forKey: "link.style"),
+           let style = WriteStyle(rawValue: raw) { writeStyle = style }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
@@ -178,8 +196,60 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     /// Device-level query that answers without any CAN setup: 0x10 version,
     /// 0x12 serial number, 0x16 adapter voltage.
-    func deviceQuery(_ code: UInt8) async throws -> [UInt8] {
-        try await exchange([code], kind: .device(code))
+    func deviceQuery(_ code: UInt8, timeout: TimeInterval = 5) async throws -> [UInt8] {
+        try await exchange([code], kind: .device(code), timeout: timeout)
+    }
+
+    /// "ramad + med kvittens" — what the app is currently set to send.
+    var linkModeText: String { Self.label(wireForm) + " + " + Self.label(writeStyle) }
+
+    /// Sweeps the four ways the same `08` can be sent and keeps the first one that
+    /// answers. `08` asks the adapter for its generation and needs no car, so this
+    /// separates "the link is wrong" from "the CAN ids are wrong" without guessing.
+    @discardableResult
+    func probeLink(timeout: TimeInterval = 2.5) async -> String {
+        guard ready else { return "länk: adaptern är inte ansluten" }
+        var tried: [String] = []
+        for form in [WireForm.framed, .raw] {
+            for style in [WriteStyle.withResponse, .withoutResponse] {
+                wireForm = form
+                writeStyle = style
+                clearWire()
+                do {
+                    let answer = try await deviceQuery(0x08, timeout: timeout)
+                    if let gen = answer.first { generation = gen }
+                    let text = "länk: \(Self.label(form)) + \(Self.label(style)) svarar · 08 → \(answer.hex)"
+                    note(text)
+                    statusText = text
+                    return text
+                } catch {
+                    tried.append("\(Self.label(form)) + \(Self.label(style)): \(ECUConnection.short(error))")
+                }
+            }
+        }
+        // Nothing answered. Hand control back to the normal fallback chain.
+        wireForm = .auto
+        writeStyle = .auto
+        let text = "länk: ingen kombination svarade (" + tried.joined(separator: " · ") + ")"
+        note(text)
+        statusText = text
+        return text
+    }
+
+    private static func label(_ form: WireForm) -> String {
+        switch form {
+        case .auto: return "auto"
+        case .framed: return "ramad"
+        case .raw: return "rå"
+        }
+    }
+
+    private static func label(_ style: WriteStyle) -> String {
+        switch style {
+        case .auto: return "auto"
+        case .withResponse: return "med kvittens"
+        case .withoutResponse: return "utan kvittens"
+        }
     }
 
     /// `width` is how many bytes the 0x22 ioctl expects per id. Four works on the
@@ -209,18 +279,22 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
         guard ready, let peripheral = active, let ch = dataChar else { throw OBDError.notConnected }
 
-        // First choice is the framed form the gen-1/gen-2 firmware speaks. If that
-        // timed out earlier on this connection, try the same bytes unframed first,
-        // in case the unit in hand wants them bare. Whatever answers is remembered.
-        let modes: [Bool]
-        if wireIsPlain || framedFailed { modes = [true, false] } else { modes = [false, true] }
+        // Which framings to try. An explicit mode (set by `probeLink`) is used
+        // alone; `auto` keeps the learned chain: framed first, then raw, but never
+        // more than two attempts per command.
+        let forms: [Bool]
+        switch wireForm {
+        case .framed: forms = [false]
+        case .raw: forms = [true]
+        case .auto: forms = (wireIsPlain || framedFailed) ? [true, false] : [false, true]
+        }
 
         var lastError: Error = OBDError.timeout
-        for (index, plain) in modes.enumerated() {
+        for (index, plain) in forms.enumerated() {
             note((plain ? ">r " : "> ") + frame.hex)
             do {
-                try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch)
-                let limit = index == 0 ? timeout : 2
+                try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch, style: writeStyle)
+                let limit = index == 0 ? timeout : min(timeout, 2)
                 let response = try await waitResponse(kind: kind, timeout: limit)
                 wireIsPlain = plain
                 wireMode = plain ? "rå" : "ramad"
@@ -338,17 +412,31 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// type has to follow the characteristic: some Pro units only expose
     /// `writeWithoutResponse` on FFE1, and asking for a response there fails
     /// silently once the error is swallowed.
-    private func write(_ bytes: [UInt8], to peripheral: CBPeripheral, char: CBCharacteristic) async throws {
+    private func write(_ bytes: [UInt8], to peripheral: CBPeripheral,
+                       char: CBCharacteristic, style: WriteStyle = .auto) async throws {
         let props = char.properties
-        let withResponse = props.contains(.write)
-        if !withResponse && !props.contains(.writeWithoutResponse) {
-            throw OBDError.badResponse("FFE1 kan inte ta emot data (\(Self.describe(props)))")
+        let useResponse: Bool
+        switch style {
+        case .withResponse:
+            useResponse = true
+        case .withoutResponse:
+            useResponse = false
+        case .auto:
+            if props.contains(.write) { useResponse = true }
+            else if props.contains(.writeWithoutResponse) { useResponse = false }
+            else { throw OBDError.badResponse("FFE1 kan inte ta emot data (\(Self.describe(props)))") }
+        }
+        if useResponse && !props.contains(.write) {
+            throw OBDError.badResponse("FFE1 saknar write (\(Self.describe(props)))")
+        }
+        if !useResponse && !props.contains(.writeWithoutResponse) {
+            throw OBDError.badResponse("FFE1 saknar writeNoResp (\(Self.describe(props)))")
         }
         var i = 0
         while i < bytes.count {
             let end = min(i + 20, bytes.count)
             let chunk = Data(bytes[i..<end])
-            if withResponse {
+            if useResponse {
                 try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
                     writeCont = c
                     peripheral.writeValue(chunk, for: char, type: .withResponse)
@@ -577,7 +665,15 @@ extension OBDelevenTransport: CBPeripheralDelegate {
         ready = true
         statusText = "ready"
         note("linked to \(peripheral.name ?? "adapter")")
-        Task { try? await self.readGeneration() }
+        Task {
+            // A stored mode is trusted first; if it no longer works, sweep again.
+            if self.wireForm != .auto && self.writeStyle != .auto {
+                do { try await self.readGeneration() }
+                catch { await self.probeLink() }
+            } else {
+                await self.probeLink()
+            }
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral,

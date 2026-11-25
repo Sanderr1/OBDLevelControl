@@ -43,6 +43,8 @@ struct DiagnosticsView: View {
                          ? "\(transport.charInfo) · \(transport.wireMode)"
                          : "—")
                 HairLine()
+                ValueRow(title: "Länkläge", value: transport.linkModeText)
+                HairLine()
                 ValueRow(title: "Felkoder", value: "Ej avlästa")
                 HairLine()
                 ValueRow(title: "Nivåreglering", value: levelText)
@@ -53,6 +55,10 @@ struct DiagnosticsView: View {
                     ActionButton(title: "Testa anslutning",
                                  enabled: !demo.enabled && transport.ready && !service.busy) {
                         Task { await service.runSelfTest() }
+                    }
+                    ActionButton(title: "Prova länklägen",
+                                 enabled: !demo.enabled && transport.ready && !service.busy) {
+                        Task { await service.probeLink() }
                     }
                 }
                 .padding(11)
