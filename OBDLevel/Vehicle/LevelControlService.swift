@@ -388,16 +388,16 @@ final class LevelControlService: ObservableObject {
         for i in profile.actions.indices {
             let role = profile.actions[i].role
             guard profile.actions[i].rid == 0,
-                  let known = knownActions.first(where: { $0.role == role }) else { continue }
+                  let known = LevelProfile.knownActions.first(where: { $0.role == role }) else { continue }
             profile.actions[i].rid = known.rid
             if profile.actions[i].parameters.isEmpty {
-                profile.actions[i].parameters = optionRecord
+                profile.actions[i].parameters = LevelProfile.optionRecord
             }
         }
-        for known in knownActions where known.role == .raiseHigh || known.role == .lowerNormal {
+        for known in LevelProfile.knownActions where known.role == .raiseHigh || known.role == .lowerNormal {
             guard !profile.actions.contains(where: { $0.role == known.role }) else { continue }
             profile.actions.append(RoutineAction(name: known.name, rid: known.rid,
-                                                 parameters: optionRecord, role: known.role))
+                                                 parameters: LevelProfile.optionRecord, role: known.role))
         }
     }
 
