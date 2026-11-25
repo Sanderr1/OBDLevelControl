@@ -89,10 +89,18 @@ struct AppHeader: View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("OBD Height Controller")
-                        .font(.system(size: 12, weight: .bold))
-                        .tracking(0.6)
-                        .foregroundStyle(Palette.blue)
+                    HStack(spacing: 7) {
+                        Image("Mark")
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 22, height: 22)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+                        Text("OBD Height Controller")
+                            .font(.system(size: 12, weight: .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(Palette.blue)
+                    }
 
                     Text(service.profile.name.isEmpty ? "Min bil" : service.profile.name)
                         .font(.system(size: 32, weight: .bold))

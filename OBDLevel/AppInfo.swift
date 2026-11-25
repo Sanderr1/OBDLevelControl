@@ -4,5 +4,5 @@ import Foundation
 /// apart from one screenshot: it has happened that an old .ipa was sideloaded,
 /// and the only visible difference was rows that were missing.
 enum AppInfo {
-    static let build = "B14 · can-id"
+    static let build = "B15 · ikon"
 }

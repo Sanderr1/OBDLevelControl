@@ -1,5 +1,7 @@
 # OBDLevel
 
+<img src="docs/icon.png" width="112" align="right" alt="OBDLevel icon: white Avant with cyan up/down arrows">
+
 An iOS app that talks to an **OBDeleven** adapter over BLE and speaks **UDS (ISO 14229)** directly —
 no OBDeleven account, no cloud, no ODX download.
 
@@ -672,7 +674,8 @@ Set your signing team, pick your iPhone, run.
 The icon lives in `OBDLevel/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` — a single
 1024×1024, 24-bit PNG with no alpha channel (alpha makes `actool` complain). `project.yml` sets
 `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`; drop in your own PNG with the same name to replace
-it.
+it. The current one is the white Avant silhouette with cyan up/down chevrons (same file kept in
+`docs/icon.png`).
 
 ### Without XcodeGen
 
