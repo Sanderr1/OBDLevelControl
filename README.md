@@ -209,29 +209,37 @@ key rotation, CRC-16/0x1021 and 0x05 escaping. Verified by decompiling
 `com.voltasit.obdeleven.utils.bluetooth.o` (`DeviceGen2Or3.k(byte[], boolean)`), which repeats
 the gen-1 writer unchanged.
 
-Gen-2/3 device commands (opcode is the first byte, second byte is the error code):
+Gen-2/3 device commands. The opcode is the first byte of the request, the reply starts with the
+same opcode followed by an error byte:
 
-| Opcode | Meaning | Source |
-|---|---|---|
-| `10` | read version | `d8.g` |
-| `11` | write version | `d8` |
-| `12` | read serial number | `d8.f` |
-| `13` | write serial number | `d8` |
-| `14` | read password (auth) | `d8.e` |
-| `15` | write password (auth) | `d8.l` |
-| `16` | read adapter voltage | `d8.h` |
-| `17` | write adapter voltage | `d8.m` |
-| `1C` | read full version | `d8.d` |
+| Opcode | Meaning | Reply | Source |
+|---|---|---|---|
+| `08` | read generation | `08 00 <gen>` | `ReadDeviceGenerationCommand` |
+| `10` | read firmware version | `10 00 <4 bytes, LE` short `>` | `p047d8.g` (ReadVersionCommand) |
+| `11` | read serial number | `11 00 <11 ASCII bytes>` | `p047d8.f` (ReadSerialNumberCommand) |
+| `12` | read CPU id | `12 00 <12 bytes>` | `p047d8.b` (ReadCpuIdCommand) |
+| `14` | write password | `14 …` | `p047d8.l` (WritePasswordCommand) |
+| `15` | read adapter voltage | `15 00 <V> <centi>` | `p047d8.h` (ReadVoltageCommand) |
+| `16` | write voltage | `16 …` | `p047d8.m` |
+| `1C` | read full version | `1C 00 <ASCII>` | `p047d8.d` (ReadFullVersionCommand) |
+
+The gen-1 class (`Device`) uses the same commands shifted by one, because `16`/`17` are its
+voltage pair: gen 1 voltage is `16`, password is `15`.
+
+The standard connect chain for a Pro 3 (`DeviceGen2Or3.p(boolean)`) is `1C` (or `10`), then `11`,
+then `12` — it reads full version, serial number and CPU id and **never sends a password**. So an
+activated unit does not require the auth write just to answer. `IDevice.h(String)` builds
+`14` + `Converter.c(password)`, and `Converter.c` is only `hex(UTF-8 bytes)`; the plaintext itself
+comes from account data on the server and is not present in the APK, so this client does not
+attempt it.
 
 Two consequences for a third-party client:
 
-* `08`, `10` and `12` are the only commands that need **no** car and no CAN setup. If all three
-  are silent, the problem is the BLE link (write type, notification state, or the unit waiting for
-  its authorisation password), not the CAN ids.
-* `IDevice.h(String)` on gen 2/3 is *not* "send this command" — it is `15` + an encrypted password.
-  A Pro unit that has been activated in the official app may expect that password before it
-  answers anything. Nothing in the official client reveals the plaintext (the transform is
-  `com.obdeleven.service.util.b.c`, fed with account data), so this client does not attempt it.
+* `08`, `10`, `11`, `12`, `15` and `1C` need **no** car and no CAN setup. If they are all silent,
+  the problem is the BLE link (write type, notification state, wrong characteristic), not the CAN
+  ids.
+* `Testa anslutning` starts with `08`, `10` and `12` for exactly that reason: they separate "the
+  adapter does not answer at all" from "the car does not answer".
 
 ### Example: trivial exchange
 

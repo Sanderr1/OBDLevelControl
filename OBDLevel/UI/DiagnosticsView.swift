@@ -47,6 +47,8 @@ struct DiagnosticsView: View {
                 HairLine()
                 ValueRow(title: "Nivåreglering", value: levelText)
                 HairLine()
+                ValueRow(title: "App", value: AppInfo.build)
+                HairLine()
                 HStack(spacing: 8) {
                     ActionButton(title: "Testa anslutning",
                                  enabled: !demo.enabled && transport.ready && !service.busy) {
