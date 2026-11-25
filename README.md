@@ -871,6 +871,27 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | Values look like nonsense | wrong scale/offset/length | compare against raw bytes in the row, adjust in Config |
 | Routine hangs at `running` | ECU waiting on a condition | press Stop, check hood/doors/level ground |
 | Writes stall mid-frame | not waiting for `didWriteValueFor` | this app waits; if you fork it, keep that |
+| Crashes the instant the adapter connects | a reply and the timeout resumed the same continuation from two threads | fixed in B16: one lock, sequence-tagged waits, main-queue publishing |
+
+### The crash on connect (fixed in B16)
+
+The transport is touched from two places: CoreBluetooth hands notifications to the main queue,
+while every command continuation runs on the cooperative pool. A reply landing at the same moment
+a command timed out let the parser and the timer both resume the same checked continuation — an
+immediate `SWIFT TASK CONTINUATION MISUSE` crash. It could only show up once the adapter actually
+started answering, which is why it appeared with the CAN-id fix and not before.
+
+What the transport does now:
+
+- one `NSRecursiveLock` guards the reassembly buffers, the pending continuation, the write
+  continuation and the log;
+- every wait carries a sequence number, so a timer that fires late can only fail *its own* wait
+  and a second `resume` is impossible by construction;
+- `@Published` values are written on the main queue only, because SwiftUI reads them there;
+- CoreBluetooth writes are hopped to the main queue, the queue the `CBCentralManager` was
+  created on;
+- a disconnect fails any waiting command with `notConnected` instead of leaving it parked until
+  its timeout, and a `writeRequest` that never gets `didWriteValueFor` times out after 3 s.
 
 ---
 

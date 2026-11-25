@@ -134,12 +134,54 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// Set after the framed attempt failed, so the fallback runs at most once.
     private var framedFailed = false
 
+    // MARK: Shared-state guard
+
+    /// CoreBluetooth hands notifications to the main queue, while every command
+    /// continuation runs on the cooperative pool. Both touch the same reassembly
+    /// buffers, the pending continuation and the log. All of it is serialised
+    /// through one recursive lock: without this, a reply landing at the same
+    /// moment a command timed out let two threads resume the same checked
+    /// continuation, which is an immediate `SWIFT TASK CONTINUATION MISUSE`
+    /// crash - and it only starts happening once the adapter really answers.
+    private let stateLock = NSRecursiveLock()
+
+    /// The transport's own copy of the link mode. `wireForm`/`writeStyle` are the
+    /// UI mirrors and are written on the main thread only; the protocol logic
+    /// reads these, so a radio reply never observes a half-applied change.
+    private var formInUse: WireForm = .auto
+    private var styleInUse: WriteStyle = .auto
+
+    /// Identifies which continuation a timer belongs to. A timer that fires
+    /// after its command already completed sees a newer sequence number, does
+    /// nothing, and can therefore never resume twice.
+    private var pendingSeq: UInt64 = 0
+    private var writeSeq: UInt64 = 0
+    private var writeTimer: Task<Void, Never>?
+
+    /// Source of truth for the log; `log` is the snapshot SwiftUI renders.
+    private var logLines: [String] = []
+
+    /// Runs `body` holding the shared state. Recursive, because a frame that
+    /// arrives while the parser is already running must not deadlock.
+    @discardableResult
+    private func sync<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    /// `@Published` may only change on the main thread, because SwiftUI reads it
+    /// there while laying out the view. Writes from the cooperative pool hop.
+    private func ui(_ body: @escaping () -> Void) {
+        if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
+    }
+
     override init() {
         super.init()
         if let raw = UserDefaults.standard.string(forKey: "link.form"),
-           let form = WireForm(rawValue: raw) { wireForm = form }
+           let form = WireForm(rawValue: raw) { wireForm = form; formInUse = form }
         if let raw = UserDefaults.standard.string(forKey: "link.style"),
-           let style = WriteStyle(rawValue: raw) { writeStyle = style }
+           let style = WriteStyle(rawValue: raw) { writeStyle = style; styleInUse = style }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
@@ -147,13 +189,14 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 
     func startScan() {
         guard central.state == .poweredOn else {
-            statusText = "bluetooth state \(central.state.rawValue)"
+            let text = "bluetooth state \(central.state.rawValue)"
+            ui { self.statusText = text }
             return
         }
-        devices.removeAll()
+        ui { self.devices.removeAll() }
         central.scanForPeripherals(withServices: [Self.svcData, Self.svcCtrl],
                                    options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-        statusText = "scanning"
+        ui { self.statusText = "scanning" }
     }
 
     func stopScan() { central.stopScan() }
@@ -161,7 +204,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     func connect(_ id: UUID) {
         guard let p = known[id] else { return }
         central.stopScan()
-        statusText = "connecting"
+        ui { self.statusText = "connecting" }
         central.connect(p, options: nil)
     }
 
@@ -170,8 +213,15 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     func note(_ line: String) {
-        log.append(line)
-        if log.count > 500 { log.removeFirst(log.count - 500) }
+        let snapshot: [String] = sync {
+            logLines.append(line)
+            if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
+            return logLines
+        }
+        ui {
+            // A snapshot captured a moment earlier must never replace a newer one.
+            if snapshot.count >= self.log.count { self.log = snapshot }
+        }
     }
 
     // MARK: Frame API
@@ -185,13 +235,13 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     func readGeneration() async throws -> UInt8 {
         let payload = try await exchange([0x08], kind: .device(0x08))
         let gen = payload.first ?? 0
-        generation = gen
+        ui { self.generation = gen }
         note("adapter generation \(gen)")
         return gen
     }
 
     func setGeneration(_ gen: UInt8) {
-        generation = gen
+        ui { self.generation = gen }
     }
 
     /// Device-level query that answers without any CAN setup: 0x10 version,
@@ -201,7 +251,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     /// "ramad + med kvittens" — what the app is currently set to send.
-    var linkModeText: String { Self.label(wireForm) + " + " + Self.label(writeStyle) }
+    var linkModeText: String {
+        let mode: (WireForm, WriteStyle) = sync { (formInUse, styleInUse) }
+        return Self.label(mode.0) + " + " + Self.label(mode.1)
+    }
 
     /// Sweeps the four ways the same `08` can be sent and keeps the first one that
     /// answers. `08` asks the adapter for its generation and needs no car, so this
@@ -212,15 +265,15 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         var tried: [String] = []
         for form in [WireForm.framed, .raw] {
             for style in [WriteStyle.withResponse, .withoutResponse] {
-                wireForm = form
-                writeStyle = style
+                sync { self.formInUse = form; self.styleInUse = style }
+                ui { self.wireForm = form; self.writeStyle = style }
                 clearWire()
                 do {
                     let answer = try await deviceQuery(0x08, timeout: timeout)
-                    if let gen = answer.first { generation = gen }
+                    if let gen = answer.first { ui { self.generation = gen } }
                     let text = "länk: \(Self.label(form)) + \(Self.label(style)) svarar · 08 → \(answer.hex)"
                     note(text)
-                    statusText = text
+                    ui { self.statusText = text }
                     return text
                 } catch {
                     tried.append("\(Self.label(form)) + \(Self.label(style)): \(ECUConnection.short(error))")
@@ -228,11 +281,11 @@ final class OBDelevenTransport: NSObject, ObservableObject {
             }
         }
         // Nothing answered. Hand control back to the normal fallback chain.
-        wireForm = .auto
-        writeStyle = .auto
+        sync { self.formInUse = .auto; self.styleInUse = .auto }
+        ui { self.wireForm = .auto; self.writeStyle = .auto }
         let text = "länk: ingen kombination svarade (" + tried.joined(separator: " · ") + ")"
         note(text)
-        statusText = text
+        ui { self.statusText = text }
         return text
     }
 
@@ -291,7 +344,8 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         // alone; `auto` keeps the learned chain: framed first, then raw, but never
         // more than two attempts per command.
         let forms: [Bool]
-        switch wireForm {
+        let mode: (WireForm, WriteStyle) = sync { (self.formInUse, self.styleInUse) }
+        switch mode.0 {
         case .framed: forms = [false]
         case .raw: forms = [true]
         case .auto: forms = (wireIsPlain || framedFailed) ? [true, false] : [false, true]
@@ -301,11 +355,11 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         for (index, plain) in forms.enumerated() {
             note((plain ? ">r " : "> ") + frame.hex)
             do {
-                try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch, style: writeStyle)
+                try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch, style: mode.1)
                 let limit = index == 0 ? timeout : min(timeout, 2)
                 let response = try await waitResponse(kind: kind, timeout: limit)
-                wireIsPlain = plain
-                wireMode = plain ? "rå" : "ramad"
+                sync { self.wireIsPlain = plain }
+                ui { self.wireMode = plain ? "rå" : "ramad" }
                 note((plain ? "<r " : "< ") + response.hex)
                 try? await Task.sleep(nanoseconds: 15_000_000)
                 return response
@@ -314,7 +368,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 var isTimeout = false
                 if let obd = error as? OBDError, case .timeout = obd { isTimeout = true }
                 guard isTimeout else { throw error }
-                if !plain { framedFailed = true }
+                if !plain { sync { self.framedFailed = true } }
                 note("timeout, nollställer bufferten")
                 clearWire()
             }
@@ -323,9 +377,11 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     private func clearWire() {
-        rx.removeAll()
-        wireBuffer.removeAll()
-        wireEscaped = false
+        sync {
+            rx.removeAll()
+            wireBuffer.removeAll()
+            wireEscaped = false
+        }
     }
 
     // MARK: Wire codec
@@ -394,24 +450,26 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     private func receive(_ bytes: [UInt8]) {
-        for byte in bytes {
-            if wireEscaped {
-                wireBuffer.append(byte)
-                wireEscaped = false
-            } else if byte == 0x05 {
-                wireEscaped = true
-            } else if byte == 0x04 {
-                let frame = wireBuffer
-                wireBuffer.removeAll(keepingCapacity: true)
-                let payload = Self.decode(frame)
-                if !payload.isEmpty {
-                    rx.append(contentsOf: payload)
-                    drain()
+        sync {
+            for byte in bytes {
+                if wireEscaped {
+                    wireBuffer.append(byte)
+                    wireEscaped = false
+                } else if byte == 0x05 {
+                    wireEscaped = true
+                } else if byte == 0x04 {
+                    let frame = wireBuffer
+                    wireBuffer.removeAll(keepingCapacity: true)
+                    let payload = Self.decode(frame)
+                    if !payload.isEmpty {
+                        rx.append(contentsOf: payload)
+                        drainLocked()
+                    }
+                } else if byte == 0x0F {
+                    wireBuffer.removeAll(keepingCapacity: true)
+                } else {
+                    wireBuffer.append(byte)
                 }
-            } else if byte == 0x0F {
-                wireBuffer.removeAll(keepingCapacity: true)
-            } else {
-                wireBuffer.append(byte)
             }
         }
     }
@@ -420,6 +478,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// type has to follow the characteristic: some Pro units only expose
     /// `writeWithoutResponse` on FFE1, and asking for a response there fails
     /// silently once the error is swallowed.
+    ///
+    /// The actual `writeValue` is hopped to the main queue, the queue this
+    /// `CBCentralManager` was created on. Calling CoreBluetooth from the
+    /// cooperative pool while its delegate calls come in on main is not safe.
     private func write(_ bytes: [UInt8], to peripheral: CBPeripheral,
                        char: CBCharacteristic, style: WriteStyle = .auto) async throws {
         let props = char.properties
@@ -445,20 +507,77 @@ final class OBDelevenTransport: NSObject, ObservableObject {
             let end = min(i + 20, bytes.count)
             let chunk = Data(bytes[i..<end])
             if useResponse {
-                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                    writeCont = c
-                    peripheral.writeValue(chunk, for: char, type: .withResponse)
-                }
+                try await writeWithResponse(chunk, to: peripheral, char: char)
             } else {
-                var spins = 0
-                while !peripheral.canSendWriteWithoutResponse && spins < 200 {
-                    try? await Task.sleep(nanoseconds: 5_000_000)
-                    spins += 1
-                }
-                peripheral.writeValue(chunk, for: char, type: .withoutResponse)
-                try? await Task.sleep(nanoseconds: 8_000_000)
+                try await writeWithoutResponse(chunk, to: peripheral, char: char)
             }
             i = end
+        }
+    }
+
+    /// Waits for `didWriteValueFor`, but not forever: a disconnect in the middle
+    /// of a chunk used to leave the continuation dangling, so every later command
+    /// hung behind the gate.
+    private func writeWithResponse(_ chunk: Data, to peripheral: CBPeripheral,
+                                   char: CBCharacteristic) async throws {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            var seq: UInt64 = 0
+            sync {
+                self.writeSeq &+= 1
+                seq = self.writeSeq
+                self.writeCont = c
+            }
+            let timer = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.failWrite(seq: seq, error: OBDError.timeout)
+            }
+            sync { self.writeTimer = timer }
+            DispatchQueue.main.async {
+                peripheral.writeValue(chunk, for: char, type: .withResponse)
+            }
+        }
+    }
+
+    private func failWrite(seq: UInt64, error: Error) {
+        let cont: CheckedContinuation<Void, Error>? = sync {
+            guard self.writeSeq == seq, let c = self.writeCont else { return nil }
+            self.writeCont = nil
+            self.writeTimer = nil
+            return c
+        }
+        cont?.resume(throwing: error)
+    }
+
+    private func writeWithoutResponse(_ chunk: Data, to peripheral: CBPeripheral,
+                                      char: CBCharacteristic) async throws {
+        for _ in 0..<200 {
+            if await canSendWithoutResponse(peripheral) {
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    DispatchQueue.main.async {
+                        peripheral.writeValue(chunk, for: char, type: .withoutResponse)
+                        c.resume()
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 8_000_000)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        // Still blocked: write anyway, exactly like the old loop did, but from
+        // the main queue so CoreBluetooth sees a consistent caller.
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                peripheral.writeValue(chunk, for: char, type: .withoutResponse)
+                c.resume()
+            }
+        }
+        try? await Task.sleep(nanoseconds: 8_000_000)
+    }
+
+    private func canSendWithoutResponse(_ peripheral: CBPeripheral) async -> Bool {
+        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.main.async { c.resume(returning: peripheral.canSendWriteWithoutResponse) }
         }
     }
 
@@ -473,46 +592,89 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     private func waitResponse(kind: Kind, timeout: TimeInterval) async throws -> [UInt8] {
-        if let idx = inbox.firstIndex(where: { $0.0 == kind }) {
-            let frame = inbox.remove(at: idx)
-            if frame.2 != 0 { throw OBDError.deviceError(frame.2) }
-            return frame.1
-        }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<[UInt8], Error>) in
+            var immediate: Result<[UInt8], Error>?
+            var seq: UInt64 = 0
+            sync {
+                if let idx = self.inbox.firstIndex(where: { $0.0 == kind }) {
+                    let frame = self.inbox.remove(at: idx)
+                    immediate = frame.2 == 0
+                        ? .success(frame.1)
+                        : .failure(OBDError.deviceError(frame.2))
+                    return
+                }
+                self.pendingSeq &+= 1
+                seq = self.pendingSeq
+                self.pendingKind = kind
+                self.pendingCont = c
+            }
+            if let immediate {
+                c.resume(with: immediate)
+                return
+            }
 
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<[UInt8], Error>) in
-            pendingKind = kind
-            pendingCont = c
-            pendingTimer = Task { [weak self] in
+            let timer = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 guard let self, !Task.isCancelled else { return }
-                guard let cont = self.pendingCont else { return }
-                self.pendingCont = nil
-                self.pendingKind = nil
-                cont.resume(throwing: OBDError.timeout)
+                self.failPending(seq: seq, error: OBDError.timeout)
             }
+            // Recording the timer after the continuation is deliberate: if the
+            // reply beat us to it, `deliver` already cleared `pendingCont`, and
+            // `failPending` then does nothing.
+            sync { self.pendingTimer = timer }
         }
+    }
+
+    /// Resumes the waiting command only if `seq` still belongs to it. If the
+    /// reply already arrived, this is a no-op - which is what stops the timer and
+    /// the parser from ever resuming the same continuation twice.
+    private func failPending(seq: UInt64, error: Error) {
+        let cont: CheckedContinuation<[UInt8], Error>? = sync {
+            guard self.pendingSeq == seq, let c = self.pendingCont else { return nil }
+            self.pendingCont = nil
+            self.pendingKind = nil
+            self.pendingTimer = nil
+            return c
+        }
+        cont?.resume(throwing: error)
     }
 
     private func deliver(_ kind: Kind, _ payload: [UInt8], _ err: UInt8) {
-        deliveredFrames += 1
-        if let cont = pendingCont, pendingKind == kind {
-            pendingCont = nil
-            pendingKind = nil
-            pendingTimer?.cancel()
-            pendingTimer = nil
+        var resume: (CheckedContinuation<[UInt8], Error>, UInt8, [UInt8])?
+        var orphan: String?
+        sync {
+            self.deliveredFrames += 1
+            if let cont = self.pendingCont, self.pendingKind == kind {
+                self.pendingCont = nil
+                self.pendingKind = nil
+                self.pendingTimer?.cancel()
+                self.pendingTimer = nil
+                // Invalidate a timer that is already past its sleep, so it cannot
+                // claim this continuation a second time.
+                self.pendingSeq &+= 1
+                resume = (cont, err, payload)
+            } else {
+                // Nothing was waiting for this frame. Log it: a reply that arrives
+                // for the wrong command is otherwise invisible, and that is exactly
+                // how the first working answer from the adapter was missed.
+                orphan = "osoliciterat svar " + payload.hex
+                    + (err == 0 ? "" : String(format: " (fel 0x%02X)", err))
+                self.inbox.append((kind, payload, err))
+                if self.inbox.count > 16 { self.inbox.removeFirst() }
+            }
+        }
+        if let (cont, err, payload) = resume {
             if err != 0 { cont.resume(throwing: OBDError.deviceError(err)) }
             else { cont.resume(returning: payload) }
-        } else {
-            // Nothing was waiting for this frame. Log it: a reply that arrives for
-            // the wrong command is otherwise invisible, and that is exactly how the
-            // first working answer from the adapter was missed.
-            note("osoliciterat svar " + payload.hex + (err == 0 ? "" : String(format: " (fel 0x%02X)", err)))
-            inbox.append((kind, payload, err))
-            if inbox.count > 16 { inbox.removeFirst() }
         }
+        if let orphan { note(orphan) }
     }
 
     private func drain() {
+        sync { drainLocked() }
+    }
+
+    private func drainLocked() {
         while !rx.isEmpty {
             switch rx[0] {
             case 0x20:
@@ -577,32 +739,71 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     private func acquire() async {
-        if gateOpen { gateOpen = false; return }
+        // Take the free slot or register under the same lock, so a `release`
+        // racing with a new command can never strand a waiter.
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            gateWaiters.append(c)
+            sync {
+                if gateOpen {
+                    gateOpen = false
+                    c.resume()
+                } else {
+                    gateWaiters.append(c)
+                }
+            }
         }
     }
 
     private func release() {
-        if gateWaiters.isEmpty { gateOpen = true }
-        else { gateWaiters.removeFirst().resume() }
+        let next: CheckedContinuation<Void, Never>? = sync {
+            if gateWaiters.isEmpty {
+                gateOpen = true
+                return nil
+            }
+            // Hand the slot straight on; `gateOpen` stays false.
+            return gateWaiters.removeFirst()
+        }
+        next?.resume()
     }
 
     private func resetConnectionState() {
-        ready = false
+        var pending: CheckedContinuation<[UInt8], Error>?
+        var pendingWrite: CheckedContinuation<Void, Error>?
+        sync {
+            // Never leave a command hanging on a continuation that can no longer
+            // be answered - that was the other way the app froze after a drop.
+            pending = pendingCont
+            pendingCont = nil
+            pendingKind = nil
+            pendingSeq &+= 1
+            pendingTimer?.cancel()
+            pendingTimer = nil
+
+            pendingWrite = writeCont
+            writeCont = nil
+            writeSeq &+= 1
+            writeTimer?.cancel()
+            writeTimer = nil
+
+            rx.removeAll()
+            inbox.removeAll()
+            wireBuffer.removeAll()
+            wireEscaped = false
+            wireIsPlain = false
+            framedFailed = false
+            deliveredFrames = 0
+        }
+        pending?.resume(throwing: OBDError.notConnected)
+        pendingWrite?.resume(throwing: OBDError.notConnected)
+
         dataChar = nil
         dataCharProps = []
-        connectedName = ""
-        generation = nil
-        rx.removeAll()
-        inbox.removeAll()
-        wireBuffer.removeAll()
-        wireEscaped = false
-        wireIsPlain = false
-        framedFailed = false
-        deliveredFrames = 0
-        charInfo = ""
-        wireMode = "ramad"
+        ui {
+            self.ready = false
+            self.connectedName = ""
+            self.generation = nil
+            self.charInfo = ""
+            self.wireMode = "ramad"
+        }
     }
 }
 
@@ -611,7 +812,8 @@ final class OBDelevenTransport: NSObject, ObservableObject {
 extension OBDelevenTransport: CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        statusText = "bluetooth state \(central.state.rawValue)"
+        let text = "bluetooth state \(central.state.rawValue)"
+        ui { self.statusText = text }
     }
 
     func centralManager(_ central: CBCentralManager,
@@ -628,8 +830,11 @@ extension OBDelevenTransport: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         active = peripheral
-        connectedName = peripheral.name ?? "adapter"
-        statusText = "discovering"
+        let name = peripheral.name ?? "adapter"
+        ui {
+            self.connectedName = name
+            self.statusText = "discovering"
+        }
         peripheral.delegate = self
         peripheral.discoverServices(nil)
     }
@@ -637,14 +842,15 @@ extension OBDelevenTransport: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager,
                         didFailToConnect peripheral: CBPeripheral,
                         error: Error?) {
-        statusText = "connect failed: \(error?.localizedDescription ?? "unknown")"
+        let text = "connect failed: \(error?.localizedDescription ?? "unknown")"
+        ui { self.statusText = text }
         resetConnectionState()
     }
 
     func centralManager(_ central: CBCentralManager,
                         didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
-        statusText = "disconnected"
+        ui { self.statusText = "disconnected" }
         active = nil
         resetConnectionState()
     }
@@ -674,9 +880,17 @@ extension OBDelevenTransport: CBPeripheralDelegate {
         for c in chars where c.uuid == Self.chrData {
             dataChar = c
             dataCharProps = c.properties
-            charInfo = "FFE1 " + Self.describe(c.properties)
-            peripheral.setNotifyValue(true, for: c)
-            statusText = "enabling notifications"
+            let info = "FFE1 " + Self.describe(c.properties)
+            ui { self.charInfo = info }
+            // Calling `setNotifyValue` on a characteristic without notify raises an
+            // Objective-C exception, which is an unrecoverable crash. Check first.
+            if c.properties.contains(.notify) || c.properties.contains(.indicate) {
+                peripheral.setNotifyValue(true, for: c)
+                ui { self.statusText = "enabling notifications" }
+            } else {
+                note("FFE1 saknar notify - adaptern kan inte skicka svar")
+                ui { self.statusText = "FFE1 saknar notify" }
+            }
         }
     }
 
@@ -685,17 +899,21 @@ extension OBDelevenTransport: CBPeripheralDelegate {
                     error: Error?) {
         guard characteristic.uuid == Self.chrData else { return }
         if let error {
-            statusText = "notify failed: \(error.localizedDescription)"
+            let text = "notify failed: \(error.localizedDescription)"
+            ui { self.statusText = text }
             return
         }
         guard characteristic.isNotifying else { return }
         dataChar = characteristic
-        ready = true
-        statusText = "ready"
+        ui {
+            self.ready = true
+            self.statusText = "ready"
+        }
         note("linked to \(peripheral.name ?? "adapter")")
         Task {
             // A stored mode is trusted first; if it no longer works, sweep again.
-            if self.wireForm != .auto && self.writeStyle != .auto {
+            let stored: (WireForm, WriteStyle) = self.sync { (self.formInUse, self.styleInUse) }
+            if stored.0 != .auto && stored.1 != .auto {
                 do { try await self.readGeneration() }
                 catch { await self.probeLink() }
             } else {
@@ -713,27 +931,36 @@ extension OBDelevenTransport: CBPeripheralDelegate {
         // cannot parse is indistinguishable from no reply at all.
         note("rx " + bytes.hex)
 
-        let before = deliveredFrames
+        let before = sync { deliveredFrames }
         receive(bytes)
-        guard deliveredFrames == before else { return }
+        guard sync({ deliveredFrames }) == before else { return }
 
         // Some firmware builds answer with the plain command bytes instead of a
         // 0x0F frame. Retry the notification as a bare reply in that case.
         if bytes.count >= 2, bytes.last != 0x04,
            [0x08, 0x20, 0x21, 0x22].contains(bytes[0]) {
             note("rx utan 0F-ram")
-            wireBuffer.removeAll()
-            wireEscaped = false
-            rx.append(contentsOf: bytes)
-            drain()
+            sync {
+                wireBuffer.removeAll()
+                wireEscaped = false
+                rx.append(contentsOf: bytes)
+                drainLocked()
+            }
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didWriteValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard let cont = writeCont else { return }
-        writeCont = nil
+        let cont: CheckedContinuation<Void, Error>? = sync {
+            let c = writeCont
+            writeCont = nil
+            writeSeq &+= 1
+            writeTimer?.cancel()
+            writeTimer = nil
+            return c
+        }
+        guard let cont else { return }
         if let error { cont.resume(throwing: error) } else { cont.resume() }
     }
 }
