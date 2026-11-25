@@ -871,27 +871,52 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | Values look like nonsense | wrong scale/offset/length | compare against raw bytes in the row, adjust in Config |
 | Routine hangs at `running` | ECU waiting on a condition | press Stop, check hood/doors/level ground |
 | Writes stall mid-frame | not waiting for `didWriteValueFor` | this app waits; if you fork it, keep that |
-| Crashes the instant the adapter connects | a reply and the timeout resumed the same continuation from two threads | fixed in B16: one lock, sequence-tagged waits, main-queue publishing |
+| Crashes the instant the adapter connects | `@Published` was written from two threads at once, deadlocking the publisher; iOS killed the app for not updating the scene | fixed in B16: all publishing on main, one lock around shared state |
 
-### The crash on connect (fixed in B16)
+### The crash on connect (B15, fixed in B16)
 
-The transport is touched from two places: CoreBluetooth hands notifications to the main queue,
-while every command continuation runs on the cooperative pool. A reply landing at the same moment
-a command timed out let the parser and the timer both resume the same checked continuation — an
-immediate `SWIFT TASK CONTINUATION MISUSE` crash. It could only show up once the adapter actually
-started answering, which is why it appeared with the CAN-id fix and not before.
+The crash log from the phone is unambiguous, and it is neither a `fatalError` nor a bad index:
 
-What the transport does now:
+```
+Thread 0 (main)
+  OBDelevenTransport.note(_:)
+  → Published.subscript.setter
+  → ObservableObjectPublisher.send()
+  → _os_unfair_lock_lock_slow            <- blocked here
 
-- one `NSRecursiveLock` guards the reassembly buffers, the pending continuation, the write
+Thread 4 (cooperative pool)
+  AttributeInvalidatingSubscriber.receive(_:)
+  → GraphHost.flushTransactions()
+  → ViewGraphRootValueUpdater.updateGraph()
+  → _MovableLockSyncMain                 <- SwiftUI graph update off-main
+
+termination: 0x8BADF00D  scene-update watchdog, 10.00 s
+```
+
+`ObservableObjectPublisher` serialises its subscribers behind an unfair lock. Two threads were
+sending on the same publisher at the same time: CoreBluetooth delivered a reply on the main queue
+and `note("rx …")` mutated `@Published log` there, while `probeLink`/`exchange` ran on the
+cooperative pool and mutated `log`, `statusText`, `wireForm` from there. Main took the publisher
+lock, the pool thread already held it - and was pushing SwiftUI's view graph from a non-main
+thread at that - so main never returned. iOS killed the app after 10 s without a scene update.
+
+It only appeared once the adapter actually started answering: before the CAN-id fix no reply ever
+reached `note("rx …")` at the same moment as a sweep write.
+
+B16 closes it by construction:
+
+- every `@Published` write goes through `ui`, which runs on the main thread;
+- `log` is a snapshot of a lock-protected `logLines`, so SwiftUI never renders an array that is
+  being mutated underneath it;
+- one `NSRecursiveLock` covers the reassembly buffers, the pending continuation, the write
   continuation and the log;
-- every wait carries a sequence number, so a timer that fires late can only fail *its own* wait
-  and a second `resume` is impossible by construction;
-- `@Published` values are written on the main queue only, because SwiftUI reads them there;
+- every wait carries a sequence number, which also closes a second latent bug - a reply and a
+  timeout resuming the same continuation. That one would have crashed as
+  `SWIFT TASK CONTINUATION MISUSE`; it never got the chance;
 - CoreBluetooth writes are hopped to the main queue, the queue the `CBCentralManager` was
   created on;
-- a disconnect fails any waiting command with `notConnected` instead of leaving it parked until
-  its timeout, and a `writeRequest` that never gets `didWriteValueFor` times out after 3 s.
+- a disconnect fails waiting commands with `notConnected` instead of parking them until timeout,
+  and a `write` that never receives `didWriteValueFor` times out after 3 s.
 
 ---
 
