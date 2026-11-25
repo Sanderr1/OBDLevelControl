@@ -200,6 +200,39 @@ response  08 00 <gen>
 
 `ReadDeviceGenerationCommand` checks `bArr[0] == 8 && bArr[1] == 0` and returns `bArr[2]`.
 
+### Gen 2 / Pro 3 differences
+
+The Android client has two device classes: `Device` (first gen, Classic SPP) and `DeviceGen2Or3`
+(`DeviceGen2Or3.java`). For the BLE Pro units only the *device-side* commands differ — auth,
+version, voltage — while the outer frame is byte-for-byte the same `0F … 04` with the same XOR
+key rotation, CRC-16/0x1021 and 0x05 escaping. Verified by decompiling
+`com.voltasit.obdeleven.utils.bluetooth.o` (`DeviceGen2Or3.k(byte[], boolean)`), which repeats
+the gen-1 writer unchanged.
+
+Gen-2/3 device commands (opcode is the first byte, second byte is the error code):
+
+| Opcode | Meaning | Source |
+|---|---|---|
+| `10` | read version | `d8.g` |
+| `11` | write version | `d8` |
+| `12` | read serial number | `d8.f` |
+| `13` | write serial number | `d8` |
+| `14` | read password (auth) | `d8.e` |
+| `15` | write password (auth) | `d8.l` |
+| `16` | read adapter voltage | `d8.h` |
+| `17` | write adapter voltage | `d8.m` |
+| `1C` | read full version | `d8.d` |
+
+Two consequences for a third-party client:
+
+* `08`, `10` and `12` are the only commands that need **no** car and no CAN setup. If all three
+  are silent, the problem is the BLE link (write type, notification state, or the unit waiting for
+  its authorisation password), not the CAN ids.
+* `IDevice.h(String)` on gen 2/3 is *not* "send this command" — it is `15` + an encrypted password.
+  A Pro unit that has been activated in the official app may expect that password before it
+  answers anything. Nothing in the official client reveals the plaintext (the transform is
+  `com.obdeleven.service.util.b.c`, fed with account data), so this client does not attempt it.
+
 ### Example: trivial exchange
 
 Inner commands:
