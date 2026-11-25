@@ -409,34 +409,37 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Self test
 
-    /// Runs the whole ladder and reports where it stops: protocol, CAN ids, generation,
-    /// extended session, tester present and one real read.
+    /// Runs the whole ladder and reports where it stops. The first three steps talk
+    /// to the adapter itself and need no car, so they prove whether the wire works
+    /// at all; the rest needs the right CAN ids.
     func runSelfTest() async {
         await run("självtest") {
             var lines: [String] = []
+
+            for code in [UInt8(0x08), 0x10, 0x12] {
+                do {
+                    let answer = try await self.transport.deviceQuery(code)
+                    lines.append(String(format: "%02X → %@", code, answer.hex))
+                    if code == 0x08, let gen = answer.first { self.transport.setGeneration(gen) }
+                } catch {
+                    lines.append(String(format: "%02X → %@", code, ECUConnection.short(error)))
+                }
+            }
+
             do {
                 try await self.transport.setProtocol(.isoTP)
                 lines.append("20 02 ok")
             } catch {
-                lines.append("stopp vid 20 02: " + ECUConnection.short(error))
-                self.statusLine = lines.joined(separator: " · ")
-                return
+                lines.append("20 02 → " + ECUConnection.short(error))
             }
-            do {
-                let gen = try await self.transport.readGeneration()
-                lines.append("generation \(gen)")
-            } catch {
-                lines.append("generation: " + ECUConnection.short(error))
-            }
+
             do {
                 try await self.transport.setCAN(tx: self.profile.txId,
                                                 rx: self.profile.rxId,
                                                 width: self.profile.idWidth ?? 4)
                 lines.append(String(format: "CAN %03X→%03X ok", self.profile.txId, self.profile.rxId))
             } catch {
-                lines.append("stopp vid CAN: " + ECUConnection.short(error))
-                self.statusLine = lines.joined(separator: " · ")
-                return
+                lines.append("CAN → " + ECUConnection.short(error))
             }
             self.ecu.txId = self.profile.txId
             self.ecu.rxId = self.profile.rxId
@@ -1047,6 +1050,14 @@ final class LevelControlService: ObservableObject {
             return
         }
         await run("raw") {
+            // Two bytes or fewer and one of the device opcodes: talk to the adapter
+            // itself (08 generation, 10 version, 12 serial, 16 voltage).
+            if bytes.count == 1, [0x08, 0x10, 0x12, 0x16].contains(bytes[0]) {
+                let answer = try await self.transport.deviceQuery(bytes[0])
+                self.statusLine = String(format: "enhet %02X → %@", bytes[0], answer.hex)
+                self.transport.note(String(format: "device %02X -> %@", bytes[0], answer.hex))
+                return
+            }
             let response = try await self.ecu.send(bytes)
             self.statusLine = "response " + response.hex
             self.transport.note("raw " + hex.uppercased() + " -> " + response.hex)

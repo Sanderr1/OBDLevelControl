@@ -73,7 +73,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         let name: String
     }
 
-    enum Kind { case proto, command, ioCtl, generation }
+    enum Kind: Equatable { case proto, command, ioCtl, generation, device(UInt8) }
 
     static let svcData = CBUUID(string: "FFE0")
     static let chrData = CBUUID(string: "FFE1")
@@ -83,6 +83,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     @Published private(set) var statusText = "idle"
     @Published private(set) var ready = false
     @Published private(set) var connectedName = ""
+    /// E.g. "FFE1 writeNoResp+notify", shown in Diagnostik.
+    @Published private(set) var charInfo = ""
+    /// Which wire form the adapter answered in: "ramad" or "rå".
+    @Published private(set) var wireMode = "ramad"
     /// 1 = classic SPP dongle, 2 = BLE, 3 = Pro 3 generation
     @Published private(set) var generation: UInt8?
     @Published var devices: [Discovered] = []
@@ -92,6 +96,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     private var known: [UUID: CBPeripheral] = [:]
     private var active: CBPeripheral?
     private var dataChar: CBCharacteristic?
+    private var dataCharProps: CBCharacteristicProperties = []
 
     private var rx: [UInt8] = []
     private var inbox: [(Kind, [UInt8], UInt8)] = []
@@ -103,9 +108,17 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// Wire-level reassembly (0x0F ... escaped ... 0x04)
     private var wireBuffer: [UInt8] = []
     private var wireEscaped = false
+    /// Counts frames handed to the parser, so a notification that decodes to
+    /// nothing can be retried as a plain reply.
+    private var deliveredFrames = 0
 
     private var gateOpen = true
     private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Learned per connection: true once a reply arrived for unframed bytes.
+    private var wireIsPlain = false
+    /// Set after the framed attempt failed, so the fallback runs at most once.
+    private var framedFailed = false
 
     override init() {
         super.init()
@@ -159,6 +172,16 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         return gen
     }
 
+    func setGeneration(_ gen: UInt8) {
+        generation = gen
+    }
+
+    /// Device-level query that answers without any CAN setup: 0x10 version,
+    /// 0x12 serial number, 0x16 adapter voltage.
+    func deviceQuery(_ code: UInt8) async throws -> [UInt8] {
+        try await exchange([code], kind: .device(code))
+    }
+
     /// `width` is how many bytes the 0x22 ioctl expects per id. Four works on the
     /// adapters tested so far; two is offered because some firmware builds take the
     /// bare 11-bit id instead.
@@ -185,14 +208,42 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         defer { release() }
 
         guard ready, let peripheral = active, let ch = dataChar else { throw OBDError.notConnected }
-        note("> " + frame.hex)
 
-        let wire = Self.encode(frame)
-        try await write(wire, to: peripheral, char: ch)
-        let response = try await waitResponse(kind: kind, timeout: timeout)
-        note("< " + response.hex)
-        try? await Task.sleep(nanoseconds: 15_000_000)
-        return response
+        // First choice is the framed form the gen-1/gen-2 firmware speaks. If that
+        // timed out earlier on this connection, try the same bytes unframed first,
+        // in case the unit in hand wants them bare. Whatever answers is remembered.
+        let modes: [Bool]
+        if wireIsPlain || framedFailed { modes = [true, false] } else { modes = [false, true] }
+
+        var lastError: Error = OBDError.timeout
+        for (index, plain) in modes.enumerated() {
+            note((plain ? ">r " : "> ") + frame.hex)
+            do {
+                try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch)
+                let limit = index == 0 ? timeout : 2
+                let response = try await waitResponse(kind: kind, timeout: limit)
+                wireIsPlain = plain
+                wireMode = plain ? "rå" : "ramad"
+                note((plain ? "<r " : "< ") + response.hex)
+                try? await Task.sleep(nanoseconds: 15_000_000)
+                return response
+            } catch {
+                lastError = error
+                var isTimeout = false
+                if let obd = error as? OBDError, case .timeout = obd { isTimeout = true }
+                guard isTimeout else { throw error }
+                if !plain { framedFailed = true }
+                note("timeout, nollställer bufferten")
+                clearWire()
+            }
+        }
+        throw lastError
+    }
+
+    private func clearWire() {
+        rx.removeAll()
+        wireBuffer.removeAll()
+        wireEscaped = false
     }
 
     // MARK: Wire codec
@@ -283,17 +334,46 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         }
     }
 
+    /// 20-byte chunks is what the Android client writes, so keep that. The write
+    /// type has to follow the characteristic: some Pro units only expose
+    /// `writeWithoutResponse` on FFE1, and asking for a response there fails
+    /// silently once the error is swallowed.
     private func write(_ bytes: [UInt8], to peripheral: CBPeripheral, char: CBCharacteristic) async throws {
+        let props = char.properties
+        let withResponse = props.contains(.write)
+        if !withResponse && !props.contains(.writeWithoutResponse) {
+            throw OBDError.badResponse("FFE1 kan inte ta emot data (\(Self.describe(props)))")
+        }
         var i = 0
         while i < bytes.count {
             let end = min(i + 20, bytes.count)
             let chunk = Data(bytes[i..<end])
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                writeCont = c
-                peripheral.writeValue(chunk, for: char, type: .withResponse)
+            if withResponse {
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                    writeCont = c
+                    peripheral.writeValue(chunk, for: char, type: .withResponse)
+                }
+            } else {
+                var spins = 0
+                while !peripheral.canSendWriteWithoutResponse && spins < 200 {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                    spins += 1
+                }
+                peripheral.writeValue(chunk, for: char, type: .withoutResponse)
+                try? await Task.sleep(nanoseconds: 8_000_000)
             }
             i = end
         }
+    }
+
+    static func describe(_ props: CBCharacteristicProperties) -> String {
+        var parts: [String] = []
+        if props.contains(.read) { parts.append("read") }
+        if props.contains(.write) { parts.append("write") }
+        if props.contains(.writeWithoutResponse) { parts.append("writeNoResp") }
+        if props.contains(.notify) { parts.append("notify") }
+        if props.contains(.indicate) { parts.append("indicate") }
+        return parts.isEmpty ? "inga" : parts.joined(separator: "+")
     }
 
     private func waitResponse(kind: Kind, timeout: TimeInterval) async throws -> [UInt8] {
@@ -318,6 +398,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     private func deliver(_ kind: Kind, _ payload: [UInt8], _ err: UInt8) {
+        deliveredFrames += 1
         if let cont = pendingCont, pendingKind == kind {
             pendingCont = nil
             pendingKind = nil
@@ -363,6 +444,16 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 rx.removeAll()
                 deliver(.ioCtl, payload, err)
 
+            case 0x10, 0x12, 0x16, 0x1C:
+                // Device-level replies (version, serial, voltage, full version) are
+                // "<code> <err> <data...>" and have no length field.
+                guard rx.count >= 2 else { return }
+                let code = rx[0]
+                let err = rx[1]
+                let payload = Array(rx.dropFirst(2))
+                rx.removeAll()
+                deliver(.device(code), payload, err)
+
             default:
                 rx.removeFirst()
             }
@@ -384,12 +475,18 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     private func resetConnectionState() {
         ready = false
         dataChar = nil
+        dataCharProps = []
         connectedName = ""
         generation = nil
         rx.removeAll()
         inbox.removeAll()
         wireBuffer.removeAll()
         wireEscaped = false
+        wireIsPlain = false
+        framedFailed = false
+        deliveredFrames = 0
+        charInfo = ""
+        wireMode = "ramad"
     }
 }
 
@@ -418,7 +515,7 @@ extension OBDelevenTransport: CBCentralManagerDelegate {
         connectedName = peripheral.name ?? "adapter"
         statusText = "discovering"
         peripheral.delegate = self
-        peripheral.discoverServices([Self.svcData, Self.svcCtrl])
+        peripheral.discoverServices(nil)
     }
 
     func centralManager(_ central: CBCentralManager,
@@ -444,11 +541,10 @@ extension OBDelevenTransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard error == nil, let services = peripheral.services else { return }
         for service in services {
-            if service.uuid == Self.svcData {
-                peripheral.discoverCharacteristics([Self.chrData], for: service)
-            } else if service.uuid == Self.svcCtrl {
-                peripheral.discoverCharacteristics([Self.chrCtrl], for: service)
-            }
+            note("tjanst \(service.uuid)")
+            // Enumerate everything, not just the two known ones: the Pro 3 may
+            // expose extra characteristics and we want to see them in the log.
+            peripheral.discoverCharacteristics(nil, for: service)
         }
     }
 
@@ -456,8 +552,13 @@ extension OBDelevenTransport: CBPeripheralDelegate {
                     didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
         guard error == nil, let chars = service.characteristics else { return }
+        for c in chars {
+            note("  \(c.uuid): \(Self.describe(c.properties))")
+        }
         for c in chars where c.uuid == Self.chrData {
             dataChar = c
+            dataCharProps = c.properties
+            charInfo = "FFE1 " + Self.describe(c.properties)
             peripheral.setNotifyValue(true, for: c)
             statusText = "enabling notifications"
         }
@@ -482,8 +583,26 @@ extension OBDelevenTransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard error == nil, let data = characteristic.value else { return }
-        receive([UInt8](data))
+        guard error == nil, let data = characteristic.value, !data.isEmpty else { return }
+        let bytes = [UInt8](data)
+        // Log every byte that arrives. Without this line a reply that the decoder
+        // cannot parse is indistinguishable from no reply at all.
+        note("rx " + bytes.hex)
+
+        let before = deliveredFrames
+        receive(bytes)
+        guard deliveredFrames == before else { return }
+
+        // Some firmware builds answer with the plain command bytes instead of a
+        // 0x0F frame. Retry the notification as a bare reply in that case.
+        if bytes.count >= 2, bytes.last != 0x04,
+           [0x08, 0x20, 0x21, 0x22].contains(bytes[0]) {
+            note("rx utan 0F-ram")
+            wireBuffer.removeAll()
+            wireEscaped = false
+            rx.append(contentsOf: bytes)
+            drain()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral,

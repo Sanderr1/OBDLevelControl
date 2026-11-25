@@ -566,8 +566,17 @@ BLE connected only means the adapter answered. If the app says `Modul 34 svarar 
    2-byte form, and one read-only `22 F1 87` per candidate. The winner is written to the profile.
 2. If nothing answers, the module is not on the bus you are talking to. Check ignition, that the
    adapter is fully seated, and that no other app (OBDeleven, Car Scanner) holds the BLE link.
-3. The log in **Diagnostik** shows every `> 21 …` and `< 21 …` frame, so the first failing step is
-   always visible.
+3. The log in **Diagnostik** shows every `>` frame. Every byte that comes back is logged as
+   `rx 0F …`, and a notification the decoder cannot parse is retried as a plain reply
+   (`rx utan 0F-ram`), so "no answer" and "answer I did not understand" are no longer the same line.
+4. `Testa anslutning` starts with three commands that need no car at all: `08` (generation),
+   `10` (firmware version), `12` (serial number). If those are silent, the issue is the adapter
+   link, not the CAN ids.
+5. **Diagnostik → Länk** shows what FFE1 actually advertises (`write`, `writeNoResp`, `notify`) and
+   which wire form answered: `ramad` (0x0F…0x04) or `rå` (bytes as-is). The app tries the framed
+   form first and falls back to raw once per connection.
+6. If a Bluetooth pairing request appears on iOS, accept it — an unencrypted write is dropped
+   silently by some firmware builds.
 
 ---
 

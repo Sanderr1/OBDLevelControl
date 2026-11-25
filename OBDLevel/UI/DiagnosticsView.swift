@@ -38,6 +38,11 @@ struct DiagnosticsView: View {
                 HairLine()
                 ValueRow(title: "Protokoll", value: "UDS · ISO-TP")
                 HairLine()
+                ValueRow(title: "Länk",
+                         value: transport.ready
+                         ? "\(transport.charInfo) · \(transport.wireMode)"
+                         : "—")
+                HairLine()
                 ValueRow(title: "Felkoder", value: "Ej avlästa")
                 HairLine()
                 ValueRow(title: "Nivåreglering", value: levelText)
@@ -127,7 +132,7 @@ struct DiagnosticsView: View {
 
     private var consoleSection: some View {
         VStack(spacing: 10) {
-            SectionHeading(title: "Konsol", trailing: "UDS hex")
+            SectionHeading(title: "Konsol", trailing: "UDS · 08/10/12 = enhet")
 
             Card {
                 HStack(spacing: 8) {
