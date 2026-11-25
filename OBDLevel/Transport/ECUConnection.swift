@@ -61,7 +61,7 @@ final class ECUConnection {
     func identification() async -> (ok: Bool, detail: String) {
         do {
             let response = try await send([0x22, 0xF1, 0x87])
-            return (response.first == 0x62, response.hex)
+            return (response.first == 0x62, response.isEmpty ? "tomt svar" : response.hex)
         } catch {
             return (false, Self.short(error))
         }

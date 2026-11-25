@@ -624,6 +624,23 @@ BLE connected only means the adapter answered. If the app says `Modul 34 svarar 
 7. If a Bluetooth pairing request appears on iOS, accept it — an unencrypted write is dropped
    silently by some firmware builds.
 
+### Reading the `<` lines
+
+Every decoded reply is logged as `< …`. The adapter's own error byte is the second byte of a
+`21`/`22`/`20` reply and comes from `CommandException` in the Android client:
+
+| Reply | Meaning |
+|---|---|
+| `< 08 00 03` | generation 3 — the link works, the question is now the bus |
+| `< 20 00` | protocol set, no error |
+| `< 21 FE …` | `RESULT_NOT_CONNECTED` — the adapter is not connected to a bus. Ignition/key on, correct CAN pins, then try `Hitta CAN-id`. |
+| `< 21 00` | request reached the adapter, the module returned no data (wrong session, or the module ignores that id) |
+| `< 21 01 …` | `RESULT_TIMEOUT` — the adapter sent the request but nothing came back |
+| `< 22 00` | ioctl accepted (CAN filter/transmit id) |
+
+`21` replies with an error byte and no length are complete answers, not truncated ones — the app
+shows them at once instead of waiting for bytes that never come.
+
 ---
 
 ## 12. Building the app

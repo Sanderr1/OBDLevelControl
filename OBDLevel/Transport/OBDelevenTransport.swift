@@ -73,7 +73,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         let name: String
     }
 
-    enum Kind: Equatable { case proto, command, ioCtl, generation, device(UInt8) }
+    enum Kind: Equatable { case proto, command, ioCtl, device(UInt8) }
 
     /// How bytes are framed on the way out, and how the write is declared to iOS.
     /// `auto` is the normal path. The explicit values are what
@@ -183,7 +183,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// 0x08 -> 0x08 0x00 <generation>. 3 = Pro 3 hardware.
     @discardableResult
     func readGeneration() async throws -> UInt8 {
-        let payload = try await exchange([0x08], kind: .generation)
+        let payload = try await exchange([0x08], kind: .device(0x08))
         let gen = payload.first ?? 0
         generation = gen
         note("adapter generation \(gen)")
@@ -495,6 +495,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
             if err != 0 { cont.resume(throwing: OBDError.deviceError(err)) }
             else { cont.resume(returning: payload) }
         } else {
+            // Nothing was waiting for this frame. Log it: a reply that arrives for
+            // the wrong command is otherwise invisible, and that is exactly how the
+            // first working answer from the adapter was missed.
+            note("osoliciterat svar " + payload.hex + (err == 0 ? "" : String(format: " (fel 0x%02X)", err)))
             inbox.append((kind, payload, err))
             if inbox.count > 16 { inbox.removeFirst() }
         }
@@ -514,11 +518,27 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 let err = rx[1]
                 let gen = rx[2]
                 rx.removeFirst(3)
-                deliver(.generation, [gen], err)
+                deliver(.device(0x08), [gen], err)
 
             case 0x21:
-                guard rx.count >= 4 else { return }
+                guard rx.count >= 2 else { return }
                 let err = rx[1]
+                if err != 0 {
+                    // `21 <err>`: a negative answer carries no length field. The
+                    // adapter says this when the module on the bus said nothing
+                    // (0xFE), and it must surface as an error, not as a timeout.
+                    rx.removeFirst(2)
+                    deliver(.command, [], err)
+                    continue
+                }
+                guard rx.count >= 4 else {
+                    // `21 00` with nothing after it: the request reached the
+                    // adapter, the module returned no data. Answering with an
+                    // empty payload beats waiting for bytes that never come.
+                    rx.removeFirst(2)
+                    deliver(.command, [], 0)
+                    continue
+                }
                 let len = Int(rx[2]) | (Int(rx[3]) << 8)
                 guard rx.count >= 4 + len else { return }
                 let payload = Array(rx[4..<(4 + len)])
