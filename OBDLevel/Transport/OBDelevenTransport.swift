@@ -371,12 +371,27 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         }
 
         var lastError: Error = OBDError.timeout
+        var sawResponse = false
         for (index, plain) in forms.enumerated() {
             note((plain ? ">r " : "> ") + frame.hex)
             do {
                 try await write(plain ? frame : Self.encode(frame), to: peripheral, char: ch, style: mode.1)
                 let limit = index == 0 ? timeout : min(timeout, 2)
-                let response = try await waitResponse(kind: kind, timeout: limit)
+                // ISO 14229 responsePending: `7F <service> 78` means the ECU has
+                // accepted the request and will send the real reply later. Keep the
+                // same exchange open and wait for that frame. Sending the request
+                // again would restart a routine or trip requestSequenceError, which
+                // is why the old code lost the VIN answer and every `31 01` reply.
+                let deadline = Date().addingTimeInterval(timeout + 10)
+                var response = try await waitResponse(kind: kind, timeout: limit)
+                sawResponse = true
+                while kind == .command, response.count >= 3,
+                      response[0] == 0x7F, response[2] == 0x78 {
+                    note("< " + response.hex + " (väntar på slutsvar)")
+                    let remaining = deadline.timeIntervalSinceNow
+                    guard remaining > 0 else { throw OBDError.timeout }
+                    response = try await waitResponse(kind: kind, timeout: remaining)
+                }
                 sync { self.wireIsPlain = plain }
                 ui { self.wireMode = plain ? "rå" : "ramad" }
                 note((plain ? "<r " : "< ") + response.hex)
@@ -386,7 +401,7 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 lastError = error
                 var isTimeout = false
                 if let obd = error as? OBDError, case .timeout = obd { isTimeout = true }
-                guard isTimeout else { throw error }
+                guard isTimeout, !sawResponse else { throw error }
                 if !plain { sync { self.framedFailed = true } }
                 note("timeout, nollställer bufferten")
                 clearWire()

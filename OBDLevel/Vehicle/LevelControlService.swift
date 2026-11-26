@@ -337,6 +337,7 @@ final class LevelControlService: ObservableObject {
             autoSettings = AutoSettings()
         }
         Self.migrate(&profile)
+        persist()
         readings = profile.channels.map {
             HeightReading(name: $0.name, did: $0.did, value: nil, raw: "–")
         }
@@ -345,6 +346,14 @@ final class LevelControlService: ObservableObject {
     /// Older profiles stored channels without units, routines without roles and had no
     /// battery channel. Roles used to be implied by the routine name, so bake that in once.
     private static func migrate(_ profile: inout LevelProfile) {
+        // B19: the old CAN probe could save the engine pair 710/77A. This app only
+        // talks to module 34, which uses 714/77E; put such profiles back.
+        if profile.txId == 0x710 && profile.rxId == 0x77A {
+            profile.txId = 0x714
+            profile.rxId = 0x77E
+            profile.idWidth = 4
+        }
+
         if profile.actions.allSatisfy({ $0.role == nil }) {
             for i in profile.actions.indices {
                 let name = profile.actions[i].name.lowercased()
@@ -528,21 +537,21 @@ final class LevelControlService: ObservableObject {
 
     // MARK: CAN id probe
 
-    /// Tries the CAN id pairs that a VAG car can use, in both byte widths and both
-    /// directions, and reports what each one answered. Read-only: one 22 F1 87 per try.
+    /// Tries the CAN id pairs module 34 can use: request `714`, response `77E`, in
+    /// both byte widths and both directions. It deliberately does not try other
+    /// control units. An earlier version did, saved the engine pair `710/77A`, and
+    /// left the adapter filtered on the *last* candidate — so every later request
+    /// timed out even though the app said "Styrenhet svarar". Read-only: `22 F1 87`.
     func probeCANIDs() async {
         guard transport.ready else {
             statusLine = "Anslut adaptern först"
             return
         }
         let candidates: [(tx: UInt32, rx: UInt32, width: Int, label: String)] = [
-            (0x714, 0x77E, 4, "Luftfjädring 34"),
-            (0x714, 0x77E, 2, "Luftfjädring 34, 2 byte"),
-            (0x77E, 0x714, 4, "34 omvänd"),
-            (0x77E, 0x714, 2, "34 omvänd, 2 byte"),
-            (0x710, 0x77A, 4, "Gateway 19"),
-            (0x7E0, 0x7E8, 4, "Motor 01"),
-            (0x720, 0x78A, 4, "Instrument 17")
+            (0x714, 0x77E, 4, "Modul 34"),
+            (0x714, 0x77E, 2, "Modul 34, 2 byte"),
+            (0x77E, 0x714, 4, "Modul 34 omvänd"),
+            (0x77E, 0x714, 2, "Modul 34 omvänd, 2 byte")
         ]
         await run("letar CAN-id") {
             var lines: [String] = []
@@ -559,9 +568,8 @@ final class LevelControlService: ObservableObject {
                     let ident = await self.ecu.identification()
                     if ident.ok {
                         lines.append("\(label) ✓ \(ident.detail)")
-                        if winner == nil {
-                            winner = (candidate.tx, candidate.rx, candidate.width)
-                        }
+                        winner = (candidate.tx, candidate.rx, candidate.width)
+                        break
                     } else {
                         lines.append("\(label) ✗ \(ident.detail)")
                     }
@@ -575,8 +583,11 @@ final class LevelControlService: ObservableObject {
                 self.profile.idWidth = winner.width
                 self.ecu.txId = winner.tx
                 self.ecu.rxId = winner.rx
-                self.ecuOpen = true
+                // Leave the adapter on the winning pair, not on the last candidate.
+                let report = try? await self.ecu.open(idWidth: winner.width)
+                self.ecuOpen = report?.answered ?? false
                 self.statusLine = "Hittade: " + lines.joined(separator: " · ")
+                    + (report.map { " · " + $0.summary } ?? "")
             } else {
                 self.ecuOpen = false
                 self.statusLine = "Inget svar alls: " + lines.joined(separator: " · ")

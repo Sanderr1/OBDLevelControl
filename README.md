@@ -442,6 +442,10 @@ VW basic settings use a fixed three-byte option record from the ODX table
 
 The app sends that record for every known routine in module 34.
 
+An ECU may answer `7F 31 78` first. That is ISO 14229 *responsePending*: the request is accepted
+and the `71 …` frame follows. The transport keeps the exchange open and waits for it; it must not
+resend `31 01`, because a second start can restart the routine or trip `requestSequenceError`.
+
 Routines that need the **hood open** are gated by the ECU, not the app: the original client reads
 a flag first (`isPopTheHoodRequired`) and disables the button. If yours returns NRC `0x22`,
 that is why.
@@ -659,8 +663,9 @@ height sensor PWM, `2B89` MMI status.
 BLE connected only means the adapter answered. If the app says `Modul 34 svarar inte`, or
 **Testa anslutning** stops before `22 F1 87`:
 
-1. **Inställningar → Hitta CAN-id.** It tries `714→77E` and its common variants, in both 4- and
-   2-byte form, and one read-only `22 F1 87` per candidate. The winner is written to the profile.
+1. **Inställningar → Hitta CAN-id.** It tries `714→77E` in both 4- and 2-byte form and in both
+   directions, with one read-only `22 F1 87` per candidate. It never tries another control unit.
+   The winner is written to the profile and applied to the adapter before the probe returns.
 2. If nothing answers, the module is not on the bus you are talking to. Check ignition, that the
    adapter is fully seated, and that no other app (OBDeleven, Car Scanner) holds the BLE link.
 3. The log in **Diagnostik** shows every `>` frame. Every byte that comes back is logged as
@@ -919,7 +924,8 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | No devices in scan | adapter is 1st gen, or not powered | 1st gen won't work on iOS; plug into OBD port for power |
 | `bluetooth state 5` (unauthorized) | permission denied | Settings → Privacy → Bluetooth → allow the app |
 | Connects, `ready` never true | `FFE1` not found | dongle firmware mismatch — update it via OBDeleven on Android once |
-| Everything times out | wrong TX/RX ids | try `7E0`/`7E8` first, confirm with a CAN log |
+| Everything times out | wrong TX/RX ids, or the adapter is still filtered on another module's pair | module 34 is `714`/`77E`; press *Hitta CAN-id* (B19 tests only module 34) and then *Öppna styrenhet* |
+| VIN or a `31 01` reply shows up as `osoliciterat svar` | ECU sent `7F xx 78` (responsePending) and the app stopped waiting | fixed in B19: the transport waits for the final frame without resending |
 | `NRC 0x7F 0x22 conditionsNotCorrect` | ignition off, hood closed, engine state | ignition on, hood open if the routine needs it |
 | `NRC 0x33 securityAccessDenied` | ECU wants seed/key | supply the key algorithm |
 | `NRC 0x36 exceededAttempts` | too many bad keys | **stop**, cycle ignition, wait; don't retry blindly |
@@ -928,6 +934,22 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | Routine hangs at `running` | ECU waiting on a condition | press Stop, check hood/doors/level ground |
 | Writes stall mid-frame | not waiting for `didWriteValueFor` | this app waits; if you fork it, keep that |
 | Crashes the instant the adapter connects | `@Published` was written from two threads at once, deadlocking the publisher; iOS killed the app for not updating the scene | fixed in B16: all publishing on main, one lock around shared state |
+
+### The CAN probe that saved the engine (B19)
+
+The B18 frame log shows two independent bugs:
+
+- *Hitta CAN-id* tried other control units after module 34. The engine pair `710/77A` answered
+  `10 03` and `22 F187`, so it was saved. Module 34's own `22 F187` started with `7F 22 78`
+  (responsePending), the app treated that as a failure, and the real VIN answer arrived later as
+  "osoliciterat svar". Every following height read and `31 01` went to the wrong ECU and timed out.
+- The probe left the adapter filtered on the **last candidate**, not on the winner, so even the
+  saved pair could not answer until *Öppna styrenhet* re-applied it.
+
+B19 fixes both: the probe only tries `714/77E` (both byte widths and both directions), applies the
+winner before returning, and the transport keeps waiting through any number of `7F xx 78` frames
+without resending the request. A profile that already saved `710/77A` is moved back to `714/77E`
+on launch.
 
 ### The crash on connect (B15, fixed in B16)
 
@@ -1007,9 +1029,10 @@ This is a diagnostic tool, not a toy. A wrong RID can command a valve or a compr
   session manager on top.
 - **No background operation.** iOS suspends BLE when the app leaves the foreground unless you add
   the bluetooth-central background mode, which this doesn't declare.
-- **B18 not yet confirmed on the car.** BLE, `10 03`, `3E 00` and DID reads answered on the A6 at
-  B16; the whole-car level routines are compiled from the ODX and await their first live test.
-  Treat the first `Höj` / `Sänk` as a test.
+- **B19 not yet confirmed on the car.** BLE, `10 03`, `3E 00` and DID reads answered on the A6 at
+  B16; B19 corrects the CAN pair and the `7F xx 78` handling that made the B18 level commands time
+  out. The whole-car level routines still await their first successful live run. Treat the first
+  `Höj` / `Sänk` as a test.
 
 ---
 
