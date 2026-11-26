@@ -51,8 +51,10 @@ with jadx. Nothing here is guessed.
 | Automatic DID discovery (`22` probing + scaling guesses) | works, ranges configurable |
 | Automatic RID discovery (`31 03` only, never starts anything) | works |
 | One-tap **Slam** | implemented — `03D4` level off, then `03CB` front vent and `03CC` rear vent |
-| One-tap **Normal** | implemented — `03C8` level on first, then `03D6`/`03E0` if the car has not moved |
+| One-tap **Normal** | implemented — `03C8` level on, watch live heights, `03CE`/`03CF` axle charge if a corner is still low |
+| Normal-height target | captured at Slam start; can be saved/updated from the overview |
 | Live wheel heights | `2B8E`–`2B91`, 1 byte × 2.1 mm, refreshed every 2 s |
+| Fault codes (module 34) | read-only `19 02 FF` in Diagnostik |
 | Identify a routine by measuring (`Mät & mappa`) | works — runs 8 s, measures the corners, assigns the role |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
@@ -573,16 +575,16 @@ The measuring values that unit lists give these DIDs that do not change between 
 | System status | `2B92` | 1 | 1 | enum |
 
 `LevelProfile.blank` ships with the wheels, battery and the three air-system values visible, so a
-fresh install reads heights, pressure and compressor temperature without a scan. **B22 moves the
+fresh install reads heights, pressure and compressor temperature without a scan. **B22 moved the
 height cards to live data**: `258F`–`2592` are body-height wheel-house *reference* values and stay
 at 414/414/412/412 mm even while the car moves, so they must not drive the cards. The first four
 channels of an existing profile are migrated to `2B8E`–`2B91` once (`heightSchema = 22`), the old
 rows are dropped and duplicates removed. B21 corrected the previous scaling guesses (`2B83` is one
-byte × 0.1 bar, `2B84`/`2B96` one byte × 0.5 °C); B22 keeps that metadata. *Inställningar →
+byte × 0.1 bar, `2B84`/`2B96` one byte × 0.5 °C); B22 and B23 keep that metadata. *Inställningar →
 Autokonfigurering → Kända DID* re-applies the table.
 
 Every other value the module lists (deviations, bellows pressures, drive select, door status, …)
-is still in the profile but **hidden by default**. B22 neither reads nor shows it. *System → Dolda
+is still in the profile but **hidden by default**. B23 neither reads nor shows it. *System → Dolda
 värden* lists them with a **Visa** button, and the eye icon on each extra row in *Inställningar →
 Höjdkanaler* toggles it back. Hidden values are kept across restarts.
 
@@ -609,14 +611,27 @@ without scanning:
 Every one uses the option record `04 00 00`. *Vent fram* / *Vent bak* are the same bleeding
 routines as *Sänk fram* / *Sänk bak*. The module ODX contains no `SECURITY-REF`, yet a real C7 can
 answer `7F 31 33` (`securityAccessDenied`) on `03E0` and `03D6`; those two are calibration-adjacent
-and commonly need security access `20103`. B22 therefore uses the known-working `03C8` first for
-*Normal* and treats a denied `03D6`/`03E0` as a logged fallback, not a fatal error. A `31 03` scan is
-still useful for routines outside this table.
+and commonly need security access `20103`. B22 introduced the known-working `03C8` path for
+*Normal*; B23 no longer calls `03D6`/`03E0` from the Normal button at all, because they only add a
+minute of waiting on this car. They remain available as mapped routines. A `31 03` scan is still
+useful for routines outside this table.
 
-**One-tap Slam** sequences `03D4` (level off) → `03CB` (front bleed) → `03CC` (rear bleed), because
-only one basic setting may run at a time. **Stoppa** aborts the whole sequence. **Normal** first
-sends `03C8` (level on) and waits up to 6 s for the car to rise; if it has not moved, it tries
-`03D6`, then `03E0`, then `03C8` again.
+**One-tap Slam** captures the current four heights as the normal-height target, then sequences
+`03D4` (level off) → `03CB` (front bleed) → `03CC` (rear bleed), because only one basic setting
+may run at a time. **Stoppa** aborts the whole sequence.
+
+**One-tap Normal** sends `03C8` (level on) and then watches the live `2B8E`–`2B91` values for up
+to 45 s. This is deliberately not a fixed six-second wait: in the B21 log the front never moved
+and the rear only started rising about 40 s after `03C8`. If a corner is still more than 10 mm
+under the saved target, Normal runs the matching axle charge (`03CE` front, `03CF` rear), sends
+`03C8` again, and watches another 20 s. It only says *normalhöjd nådd* when all four corners are
+within tolerance; otherwise it says `INTE klar` and names the corners that are still low. The
+target is captured before each Slam and is not overwritten by a second Slam on an already low
+car. It can also be saved manually from *Översikt → Normalhöjd → Spara nu*.
+
+**Fault codes** are read in *Diagnostik → Felkoder* with `19 02 FF`
+(`reportDTCByStatusMask`). Nothing is cleared. The raw `59 02 …` response is logged as well, so a
+different record layout is still diagnosable.
 
 **The session is the other half of the problem.** `DiagnServi_RoutiContrStartBasicSetti` is linked
 to the development, extended and end-of-line sessions — *not* the default session. The ECU leaves
@@ -685,8 +700,8 @@ and **Diagnostik**.
 | `1236` | Nivåtryck HB | `2B98`–`2B9B` | Börvärdeavvikelse per hjul |
 
 **Only `2B8E`–`2B91` are live height values.** `258F`–`2592` are the wheel-house reference
-(414/414/412/412 mm) and stay put when the car moves, so B22 uses them only as an identity check,
-never for the cards.
+(414/414/412/412 mm) and stay put when the car moves, so the app uses them only as an identity
+check, never for the cards.
 
 Also present, unassigned by default: `220D` doors/lids, `282A` Audi drive select, `1309` car-jack
 mode, `1301`–`1308` valve/compressor counters, `0x1210` calibrated level values, `2B85`–`2B88`
@@ -764,14 +779,15 @@ Every read pass also writes one line with all channels:
 **Kopiera allt** / **Dela** in Diagnostik exports the full retained log (2500 lines) with a header:
 
 ```
-OBDLevel B20 · modul 34
+OBDLevel B23 · luftfjädring
 tid: 2026-11-26 18:30:06
 adapter: OBDeleven · gen 3
 länk: FFE1 writeNoResp+notify · ramad · med kvittens
 CAN: 755→7BF (4 byte)
 modul 34: JA · 258F · 2B83
 identitet: F187 = 4G0907553F · 258F = 09 B0 · 2B83 = 00 00 · 2B92 = 00 01
-status: Modul 34 öppen · …
+normalhöjd: VF 340 · HF 332 · VB 370 · HB 372
+status: Normal klar · normalhöjd nådd · …
 ```
 
 ---
@@ -830,14 +846,19 @@ either talks to the adapter or, in demo mode, to a local simulation.
 **Översikt**
 - Four wheel heights in a 2×2 grid. `Läs nu` reads the wheels and battery; `Auto 2 s` repeats it.
   Hidden extras are never part of this loop.
+- **Normalhöjd** under the height buttons shows the saved target, e.g. `VF 340 · HF 332 · VB 370 ·
+  HB 372`. `Spara nu`/`Uppdatera` captures the current heights. A normal target is also captured
+  automatically at the start of every Slam (but an existing target is kept if the car is already
+  clearly lower, so a second Slam cannot make "normal" mean "slammed").
 - **Slam / Normal** — the two primary controls, one tap each.
-  - **Slam** turns self-levelling off (`31 01 03D4 04 00 00`), then bleeds the front axle
-    (`03CB`) and finally the rear axle (`03CC`). Only one basic setting may run at a time, so the
-    steps are sequential. `Stoppa` aborts the whole sequence.
-  - **Normal** first sends `31 01 03C8 04 00 00` (self-levelling on), waits up to 6 s for the car to
-    rise, and only if nothing moves tries the reference level (`03D6`) and then `03E0`; both are
-    calibration-adjacent and commonly need security access `20103`, so a denied fallback is logged
-    and is not fatal. `03C8` is sent again in that case to leave level control on.
+  - **Slam** captures the normal target, turns self-levelling off (`31 01 03D4 04 00 00`), then
+    bleeds the front axle (`03CB`) and finally the rear axle (`03CC`). Only one basic setting may
+    run at a time, so the steps are sequential. `Stoppa` aborts the whole sequence.
+  - **Normal** first sends `31 01 03C8 04 00 00` (self-levelling on), then watches the live heights
+    for up to 45 s. If a corner is still more than 10 mm under the saved target, it runs that
+    axle's charge (`03CE`/`03CF`), sends `03C8` again, and watches another 20 s. It reports
+    `normalhöjd nådd` only when all four corners are within tolerance, otherwise `INTE klar` with
+    the corners that are still off. This is why the result is not a false "done" after six seconds.
   - The same card gets a `Stoppa` button while anything is running, which sends `31 02` instead of
     waiting out the routine.
 - Both buttons, the per-axle buttons, venting and the level-control switch are disabled unless the
@@ -862,6 +883,8 @@ either talks to the adapter or, in demo mode, to a local simulation.
 
 **Diagnostik**
 - Controller address, adapter + generation, link state, protocol, DTC status.
+- **Felkoder** reads module 34 with `19 02 FF` and lists each DTC as
+  `P0301-00 · 000301 · confirmed, failedThisCycle`; the raw response is in the log. Read-only.
 - Every channel with decoded value, DID and raw response bytes — use this to verify scaling.
 - `Testa anslutning` runs protocol → generation → CAN ids → `10 03` → `3E 00` and reports where
   it stopped.
@@ -1167,11 +1190,12 @@ This is a diagnostic tool, not a toy. A wrong RID can command a valve or a compr
   session manager on top.
 - **No background operation.** iOS suspends BLE when the app leaves the foreground unless you add
   the bluetooth-central background mode, which this doesn't declare.
-- **B21 not yet confirmed on the car.** B20 proved the right ECU (`755/7BF`, identity
-  `258F · 2B83 · 2B92`) and correct heights on the A6, but every routine returned `7F 31 7E`
-  because the extended session had expired. B21 reopens `10 03` before every routine. The whole-car
-  level routines still await their first successful live run; treat the first `Höj` / `Sänk` as a
-  test and copy the log whatever happens.
+- **B23 has not been tested on the car yet.** B21 proved that routines start (`71 01` for `03CB`,
+  `03CC`, `03D4`, `03C8`, `03DD`) once `10 03` is sent immediately before `31 01`; B22 was built but
+  never installed. B23 adds the saved normal-height target, a 45 s height watch and the
+  `03CE`/`03CF` axle charges, none of which have run on the car yet. Treat the first Slam → Normal
+  as a test and copy the log whatever happens. Do not drive until Normal reports `normalhöjd nådd`
+  (or run Normal again / save a correct target if it says `INTE klar`).
 
 ---
 

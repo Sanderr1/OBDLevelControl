@@ -186,6 +186,11 @@ struct LevelProfile: Codable {
     /// Bumped when the four wheel channels move to a new DID scheme. Nil means
     /// a pre-B22 profile that still points at the static wheel-house values.
     var heightSchema: Int?
+    /// B23: the four live heights captured when the car was last at normal
+    /// height, normally at the start of a Slam. `Normal` uses them as its
+    /// target, so "back to normal" means the same numbers as before the slam,
+    /// not just "something moved". Optional so older profiles still decode.
+    var normalHeightsMM: [Double]? = nil
 
     /// The four live absolute height values from EV_AirSuspe_003024:
     /// `DOP_UFLOA1Byte21xMilliMeter`, one byte × 2.1 mm. The older `258F`–`2592`
@@ -334,6 +339,11 @@ final class LevelControlService: ObservableObject {
     @Published var statusLine = ""
     @Published var discoveredDIDs: [String] = []
     @Published var discoveredRoutines: [String] = []
+    /// B23: DTCs read from module 34 by Diagnostik. Empty plus `faultsChecked
+    /// == false` means "not read yet".
+    @Published var faultCodes: [String] = []
+    /// True once `19 02 FF` has answered, even when the answer held no DTCs.
+    @Published private(set) var faultsChecked = false
     @Published var autoSettings: AutoSettings {
         didSet { persistAuto() }
     }
@@ -1013,6 +1023,130 @@ final class LevelControlService: ObservableObject {
         return out
     }
 
+    // MARK: Normal height target (B23)
+
+    /// The four live heights captured when the car was at normal height,
+    /// normally at the start of a Slam. Nil means no target has been saved
+    /// yet; Normal then only switches level control on and reports what the
+    /// car does.
+    var normalBaseline: [Double]? {
+        guard let stored = profile.normalHeightsMM, stored.count == 4 else { return nil }
+        return stored
+    }
+
+    var normalBaselineSummary: String {
+        guard let baseline = normalBaseline else { return "ej sparad" }
+        return WheelSlot.allCases.enumerated().map { index, slot in
+            String(format: "%@ %.0f", slot.shortTitle, baseline[index])
+        }.joined(separator: " · ")
+    }
+
+    /// Saves the current four heights as the normal target. Useful before the
+    /// first Slam, or after suspension work, when the car is known to sit at
+    /// normal height.
+    func saveNormalHeight() async {
+        await run("normalhöjd") {
+            let heights = await self.heightSnapshot()
+            guard heights.compactMap({ $0 }).count == 4 else {
+                self.statusLine = "Normalhöjd: alla fyra höjder måste läsas först"
+                return
+            }
+            self.storeNormalBaseline(heights, reason: "manuellt")
+            _ = await self.fetch(self.fastChannels)
+            self.statusLine = "Normalhöjd sparad · " + self.heightSummary
+        }
+    }
+
+    /// Captures the height the car had before a Slam. A second Slam on an
+    /// already lowered car must not move the target, so an existing baseline
+    /// is only refreshed when the car is close to it.
+    private func captureNormalBaselineForSlam(_ heights: [Double?]) {
+        let values = heights.compactMap { $0 }
+        guard values.count == 4 else {
+            transport.note("slam: kunde inte spara normalhöjd, höjder saknas")
+            return
+        }
+        if let old = normalBaseline {
+            let oldMean = old.reduce(0, +) / Double(old.count)
+            let newMean = values.reduce(0, +) / Double(values.count)
+            guard abs(newMean - oldMean) <= 12 else {
+                transport.note("slam: behåller normalhöjd " + normalBaselineSummary)
+                return
+            }
+        }
+        storeNormalBaseline(heights, reason: "före slam")
+    }
+
+    private func storeNormalBaseline(_ heights: [Double?], reason: String) {
+        let values = heights.compactMap { $0 }
+        guard values.count == 4 else { return }
+        profile.normalHeightsMM = values
+        transport.note("normalhöjd sparad (\(reason)): " + summary(of: heights))
+    }
+
+    /// The first four readings are always the four wheels; `fetch` keeps them
+    /// in profile order and the migration guarantees that order.
+    private var fourHeights: [Double?] {
+        WheelSlot.allCases.map { slot in
+            let index = slot.rawValue
+            return index < readings.count ? readings[index].value : nil
+        }
+    }
+
+    private func summary(of values: [Double?]) -> String {
+        let parts = WheelSlot.allCases.enumerated().compactMap { index, slot -> String? in
+            guard index < values.count, let value = values[index] else { return nil }
+            return String(format: "%@ %.0f", slot.shortTitle, value)
+        }
+        return parts.isEmpty ? "höjder ej avlästa" : parts.joined(separator: " · ")
+    }
+
+    /// A corner counts as back at normal when it is no more than `below` mm
+    /// under the saved target and no more than `above` mm over it. A charging
+    /// routine can overshoot a little; level control then trims it down, so a
+    /// few mm high is safer than a few mm low.
+    private func reached(_ current: [Double?], _ target: [Double],
+                         below: Double = 10, above: Double = 20) -> Bool {
+        guard current.count >= 4, target.count >= 4 else { return false }
+        for index in 0..<4 {
+            guard let value = current[index] else { return false }
+            if value < target[index] - below { return false }
+            if value > target[index] + above { return false }
+        }
+        return true
+    }
+
+    private func missingSummary(_ current: [Double?], _ target: [Double]) -> String {
+        let parts = WheelSlot.allCases.enumerated().compactMap { index, slot -> String? in
+            guard index < current.count, index < target.count,
+                  let value = current[index] else { return nil }
+            let difference = value - target[index]
+            guard difference < -10 || difference > 20 else { return nil }
+            return String(format: "%@ %+.0f mm", slot.shortTitle, difference)
+        }
+        return parts.isEmpty ? "höjder saknas" : parts.joined(separator: " · ")
+    }
+
+    /// Polls the live heights while the car's level control or an axle charge
+    /// runs. Updates the cards every pass and writes one compact line to the
+    /// log, so a copied log shows the movement instead of only the final value.
+    private func watchHeights(baseline: [Double]?,
+                              maxSeconds: Double,
+                              label: String) async throws -> [Double?] {
+        let start = Date()
+        var last: [Double?] = []
+        while Date().timeIntervalSince(start) < maxSeconds {
+            if stopRequested { throw CancellationError() }
+            _ = await fetch(fastChannels)
+            last = fourHeights
+            let elapsed = Int(Date().timeIntervalSince(start).rounded())
+            transport.note(String(format: "%@ %2ds: %@", label, elapsed, heightSummary))
+            if let baseline, reached(last, baseline, below: 8, above: 8) { break }
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+        return last
+    }
+
     /// Runs one routine for a few seconds and measures how the corners moved.
     /// If the movement matches the selected role's direction, the role is assigned.
     func identify(_ action: RoutineAction, role: ActionRole?) async {
@@ -1402,6 +1536,13 @@ final class LevelControlService: ObservableObject {
             self.stopRequested = false
             self.canStop = true
             defer { self.canStop = false }
+
+            // Remember where "normal" was before anything is vented. This is
+            // what Normal later aims for, so a half-finished raise cannot be
+            // mistaken for success just because one axle moved.
+            let before = await self.heightSnapshot()
+            self.transport.note("slam: före · " + self.summary(of: before))
+            self.captureNormalBaselineForSlam(before)
             self.transport.note("slam: börjar · nivå av → vent fram → vent bak")
 
             self.statusLine = "Slam 1/3 · nivåreglering av…"
@@ -1460,11 +1601,21 @@ final class LevelControlService: ObservableObject {
         }
     }
 
-    /// One tap back to normal height. `03C8` activates self-levelling, which is
-    /// the routine that worked on the car; it then raises itself to its normal
-    /// level. If nothing moves within a few seconds, try the reference-level
-    /// routine and then `03E0`. Those two often need security access 20103 on a
-    /// C7, so a NRC is logged and is not fatal: level control stays on.
+    /// One tap back to normal height. B23 watches the live heights instead of
+    /// sleeping a fixed number of seconds:
+    ///
+    /// 1. `03C8` switches self-levelling on.
+    /// 2. The four live heights are polled for up to 45 s. `03C8` returns at
+    ///    once; on the car the rear only started moving ~40 s later.
+    /// 3. If a corner is still clearly under the saved normal height, the
+    ///    matching axle charge runs (`03CE` front, `03CF` rear), then `03C8`
+    ///    again.
+    /// 4. The final heights are compared with the target. Anything still low
+    ///    is reported as "INTE klar" instead of a false success.
+    ///
+    /// The target is captured at Slam start, so "normal" means the height the
+    /// car had before the slam. `03D6`/`03E0` are not used here: they commonly
+    /// answer `7F 31 33` on a C7 and would only waste a minute.
     func normalLevel() async {
         guard ecuOpen else {
             statusLine = "Modul 34 är inte verifierad – kör Testa anslutning eller Hitta CAN-id först"
@@ -1480,102 +1631,120 @@ final class LevelControlService: ObservableObject {
             self.canStop = true
             defer { self.canStop = false }
 
-            let before = await self.heightSnapshot()
-            self.transport.note("normal: börjar · nivåreglering på")
+            let baseline = self.normalBaseline
+            self.transport.note("normal: börjar"
+                                + (baseline == nil
+                                   ? " · ingen normalhöjd sparad"
+                                   : " · mål " + self.normalBaselineSummary))
+
+            // Show where the car starts before anything moves.
+            _ = await self.fetch(self.fastChannels)
+            self.transport.note("normal: före · " + self.heightSummary)
 
             self.statusLine = "Normal 1/3 · nivåreglering på…"
             self.lastAction = on
-            _ = try await self.ecu.runRoutine(on.rid,
-                                               parameters: on.parameters,
-                                               maxSeconds: 20,
-                                               shouldStop: { self.stopRequested }) { msg in
-                self.statusLine = "Normal 1/3 · nivå på · \(msg)"
-            }
-            self.levelControlEnabled = true
-
-            self.statusLine = "Normal 2/3 · väntar på att bilen ska höja sig…"
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            if self.stopRequested { throw CancellationError() }
-
-            let after = await self.heightSnapshot()
-            var moved = false
-            for (old, new) in zip(before, after) {
-                if let old = old, let new = new, new - old >= 3 {
-                    moved = true
-                    break
+            do {
+                _ = try await self.ecu.runRoutine(on.rid,
+                                                  parameters: on.parameters,
+                                                  maxSeconds: 20,
+                                                  shouldStop: { self.stopRequested }) { msg in
+                    self.statusLine = "Normal 1/3 · nivå på · \(msg)"
                 }
+                self.levelControlEnabled = true
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                self.levelControlEnabled = false
+                self.transport.note("normal: nivåreglering på nekades · "
+                                    + ECUConnection.short(error))
+                self.statusLine = "Normal: kunde inte slå på nivåregleringen · "
+                    + ECUConnection.short(error)
+                return
             }
-            self.transport.note("normal: nivå på · rörelse " + (moved ? "ja" : "nej"))
 
-            var fallbackDenied = false
-            if !moved {
-                var referenceDone = false
-                if let reference = self.action(for: .referenceLevel), reference.rid != 0 {
-                    self.statusLine = "Normal 2/3 · referensnivå…"
-                    self.lastAction = reference
+            self.statusLine = "Normal 2/3 · väntar på att bilen ska nå normalhöjd…"
+            var current = try await self.watchHeights(baseline: baseline,
+                                                      maxSeconds: baseline == nil ? 30 : 45,
+                                                      label: "normal")
+
+            if let baseline, !self.reached(current, baseline) {
+                for axle in [Axle.front, .rear] {
+                    if self.stopRequested { throw CancellationError() }
+                    let indices = axle == .front ? [0, 1] : [2, 3]
+                    let deficits = indices.compactMap { index -> Double? in
+                        guard index < current.count, let value = current[index] else { return nil }
+                        return baseline[index] - value
+                    }
+                    let worst = deficits.max() ?? 0
+                    guard worst > 10 else { continue }
+
+                    let role: ActionRole = axle == .front ? .raiseFront : .raiseRear
+                    guard let routine = self.action(for: role), routine.rid != 0 else {
+                        self.transport.note("normal: \(axle.title) "
+                                            + "\(Int(worst.rounded())) mm under mål, men "
+                                            + "\(role.title) saknar RID")
+                        continue
+                    }
+
+                    self.statusLine = "Normal · höjer \(axle.title) "
+                        + "\(Int(worst.rounded())) mm…"
+                    self.lastAction = routine
                     do {
-                        let result = try await self.ecu.runRoutine(reference.rid,
-                                                                   parameters: reference.parameters,
-                                                                   maxSeconds: 90,
-                                                                   shouldStop: { self.stopRequested }) { msg in
-                            self.statusLine = "Normal 2/3 · referens · \(msg)"
+                        _ = try await self.ecu.runRoutine(routine.rid,
+                                                          parameters: routine.parameters,
+                                                          maxSeconds: 60,
+                                                          shouldStop: { self.stopRequested }) { msg in
+                            self.statusLine = "Normal · höjer \(axle.title) · \(msg)"
                         }
-                        referenceDone = true
-                        self.transport.note("normal: referensnivå klar " + result.hex)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
-                        fallbackDenied = true
-                        self.transport.note("normal: referensnivå nekad · " + ECUConnection.short(error))
+                        self.transport.note("normal: \(axle.title)höjning nekades · "
+                                            + ECUConnection.short(error))
                     }
-                }
 
-                if !referenceDone, let normal = self.action(for: .lowerNormal), normal.rid != 0 {
-                    self.statusLine = "Normal 2/3 · normalnivå…"
-                    self.lastAction = normal
+                    // A basic setting can leave level control off. Turn it
+                    // back on before letting the car settle.
                     do {
-                        let result = try await self.ecu.runRoutine(normal.rid,
-                                                                   parameters: normal.parameters,
-                                                                   maxSeconds: 90,
-                                                                   shouldStop: { self.stopRequested }) { msg in
-                            self.statusLine = "Normal 2/3 · normalnivå · \(msg)"
-                        }
-                        fallbackDenied = false
-                        self.transport.note("normal: normalnivå klar " + result.hex)
+                        _ = try await self.ecu.runRoutine(on.rid,
+                                                          parameters: on.parameters,
+                                                          maxSeconds: 20,
+                                                          shouldStop: { self.stopRequested }) { _ in }
+                        self.levelControlEnabled = true
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
-                        fallbackDenied = true
-                        self.transport.note("normal: normalnivå nekad · " + ECUConnection.short(error))
+                        self.transport.note("normal: nivå på efter \(axle.title) · "
+                                            + ECUConnection.short(error))
                     }
-                }
 
-                // `03E0` leaves self-levelling off. Switch it back on even when
-                // the optional level fallbacks were denied.
-                self.statusLine = "Normal 3/3 · nivåreglering på…"
-                self.lastAction = on
-                do {
-                    _ = try await self.ecu.runRoutine(on.rid,
-                                                       parameters: on.parameters,
-                                                       maxSeconds: 20,
-                                                       shouldStop: { self.stopRequested }) { msg in
-                        self.statusLine = "Normal 3/3 · nivå på · \(msg)"
-                    }
-                    self.levelControlEnabled = true
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    fallbackDenied = true
-                    self.transport.note("normal: nivåreglering på nekades · " + ECUConnection.short(error))
+                    self.statusLine = "Normal 3/3 · låter \(axle.title) sätta sig…"
+                    current = try await self.watchHeights(baseline: baseline,
+                                                          maxSeconds: 20,
+                                                          label: "normal \(axle.title)")
                 }
             }
 
             let result = await self.fetch(self.fastChannels)
             self.report(result, label: "normal höjder")
-            self.statusLine = "Normal · " + self.heightSummary
-                + " · nivåreglering på"
-                + (fallbackDenied && !moved ? " · referens nekades" : "")
-            self.transport.note("normal klar: " + self.heightSummary)
+            current = self.fourHeights
+
+            if let baseline {
+                if self.reached(current, baseline) {
+                    self.statusLine = "Normal klar · normalhöjd nådd · " + self.heightSummary
+                    self.transport.note("normal klar: mål nått · " + self.heightSummary)
+                } else {
+                    let missing = self.missingSummary(current, baseline)
+                    self.statusLine = "Normal · INTE klar · \(missing) · kör Normal igen"
+                    self.transport.note("normal: mål ej nått · \(missing) · mål "
+                                        + self.normalBaselineSummary + " · nu "
+                                        + self.heightSummary)
+                }
+            } else {
+                self.statusLine = "Normal · nivåreglering på · " + self.heightSummary
+                self.transport.note("normal klar utan sparat mål: " + self.heightSummary)
+            }
+            self.levelControlEnabled = true
         }
     }
 
@@ -1667,6 +1836,94 @@ final class LevelControlService: ObservableObject {
             self.statusLine = "response " + response.hex
             self.transport.note("raw " + hex.uppercased() + " -> " + response.hex)
         }
+    }
+
+    // MARK: Fault codes (B23)
+
+    /// Reads stored DTCs from module 34 with `19 02 FF`
+    /// (reportDTCByStatusMask, all statuses). Nothing is cleared. The raw
+    /// response is logged too, so an unexpected record layout is still
+    /// visible in the copied log.
+    func readFaultCodes() async {
+        guard ecuOpen else {
+            statusLine = "Modul 34 är inte verifierad – kör Testa anslutning först"
+            return
+        }
+        await run("felkoder") {
+            self.faultCodes.removeAll()
+            self.faultsChecked = false
+            _ = await self.ecu.reopenSession()
+            do {
+                let response = try await self.ecu.send([0x19, 0x02, 0xFF])
+                self.transport.note("felkoder 19 02 FF -> " + response.hex)
+                self.faultCodes = Self.parseDTCResponse(response)
+                self.faultsChecked = true
+                if self.faultCodes.isEmpty {
+                    self.statusLine = "Inga felkoder i modul 34"
+                    self.transport.note("felkoder: inga")
+                } else {
+                    self.statusLine = "\(self.faultCodes.count) felkoder i modul 34"
+                    self.transport.note("felkoder: "
+                                        + self.faultCodes.joined(separator: " · "))
+                }
+            } catch {
+                self.statusLine = "Felkodsläsning misslyckades · "
+                    + ECUConnection.short(error)
+                self.transport.note("felkoder: misslyckades · "
+                                    + ECUConnection.short(error))
+            }
+        }
+    }
+
+    /// `59 02 <statusAvailabilityMask> [DTC0 DTC1 DTC2 status]…`. The first
+    /// two DTC bytes give the usual P/C/B/U code, the third is the failure
+    /// type byte, so the display is e.g. `P0301-00 · 000301 · confirmed`.
+    private static func parseDTCResponse(_ response: [UInt8]) -> [String] {
+        guard response.count >= 3, response[0] == 0x59, response[1] == 0x02 else {
+            return ["rå " + response.hex]
+        }
+        var out: [String] = []
+        var index = 3
+        while index + 3 < response.count {
+            let b0 = response[index]
+            let b1 = response[index + 1]
+            let b2 = response[index + 2]
+            let status = response[index + 3]
+            out.append(formatDTC(b0, b1, b2, status))
+            index += 4
+        }
+        return out
+    }
+
+    private static func formatDTC(_ b0: UInt8, _ b1: UInt8,
+                                  _ b2: UInt8, _ status: UInt8) -> String {
+        let letter: Character
+        switch b0 >> 6 {
+        case 0: letter = "P"
+        case 1: letter = "C"
+        case 2: letter = "B"
+        default: letter = "U"
+        }
+        let first = (b0 >> 4) & 0x03
+        let second = b0 & 0x0F
+        let code = String(letter)
+            + String(format: "%X%X%02X-%02X", first, second, b1, b2)
+        let raw = String(format: "%02X%02X%02X", b0, b1, b2)
+        return "\(code) · \(raw) · \(dtcFlags(status))"
+    }
+
+    private static func dtcFlags(_ status: UInt8) -> String {
+        var flags: [String] = []
+        if status & 0x01 != 0 { flags.append("testFailed") }
+        if status & 0x02 != 0 { flags.append("failedThisCycle") }
+        if status & 0x04 != 0 { flags.append("pending") }
+        if status & 0x08 != 0 { flags.append("confirmed") }
+        if status & 0x10 != 0 { flags.append("notTestedSinceClear") }
+        if status & 0x20 != 0 { flags.append("failedSinceClear") }
+        if status & 0x40 != 0 { flags.append("notTestedThisCycle") }
+        if status & 0x80 != 0 { flags.append("warningLamp") }
+        return flags.isEmpty ? String(format: "status %02X", status)
+            : flags.joined(separator: ", ")
     }
 
     // MARK: Discovery

@@ -79,14 +79,28 @@ struct OverviewView: View {
                 Text(rideStatus)
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)
-                    .lineLimit(3)
+                    .lineLimit(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
+
+                if !demo.enabled && !service.levelControlEnabled {
+                    HairLine()
+                    HStack(spacing: 7) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                        Text("Nivåregleringen är av – tryck Normal innan du kör.")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(Palette.amber)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
             }
 
             if !demo.enabled {
-                Text("Slam stänger av nivåregleringen och ventilerar fram och bak i tur. Normal slår på nivåregleringen igen så bilen höjer sig till normalhöjd.")
+                Text("Slam stänger av nivåregleringen och ventilerar fram och bak i tur. Normal slår på nivåregleringen, väntar tills bilen är tillbaka på den sparade normalhöjden och höjer fram/bak vid behov. Kör inte förrän Normal säger att höjden är nådd.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,6 +175,32 @@ struct OverviewView: View {
                     autoRefresh.toggle()
                 }
             }
+
+            if !demo.enabled {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Normalhöjd")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Palette.muted)
+                        Text(service.normalBaselineSummary)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Palette.ink)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                    Spacer(minLength: 6)
+                    Button {
+                        Task { await service.saveNormalHeight() }
+                    } label: {
+                        Text(service.normalBaseline == nil ? "Spara nu" : "Uppdatera")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(canSaveBaseline ? Palette.blue : Palette.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSaveBaseline)
+                }
+                .padding(.horizontal, 2)
+            }
         }
     }
 
@@ -184,6 +224,12 @@ struct OverviewView: View {
 
     private var canRead: Bool {
         !demo.enabled && transport.ready && !service.busy
+    }
+
+    /// Saving the normal target sends reads to module 34, so it needs the same
+    /// identity proof as the routine buttons.
+    private var canSaveBaseline: Bool {
+        !demo.enabled && liveReady && !service.busy
     }
 
     // MARK: Everything else, folded away

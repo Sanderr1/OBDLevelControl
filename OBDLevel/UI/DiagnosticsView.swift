@@ -8,6 +8,7 @@ struct DiagnosticsView: View {
 
     @State private var input = "22 F1 90"
     @State private var showDetails = false
+    @State private var showFaults = false
     @State private var showSensors = false
     @State private var showConsole = false
     @State private var showLog = true
@@ -16,6 +17,7 @@ struct DiagnosticsView: View {
     var body: some View {
         VStack(spacing: 18) {
             statusSection
+            faultSection
             detailsSection
             sensorSection
             consoleSection
@@ -82,6 +84,64 @@ struct DiagnosticsView: View {
 
     private var canRun: Bool {
         !demo.enabled && transport.ready && !service.busy
+    }
+
+    // MARK: Fault codes (B23)
+
+    private var faultSection: some View {
+        Card {
+            DisclosureGroup(isExpanded: $showFaults) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HairLine()
+                    if service.faultCodes.isEmpty {
+                        Text(service.faultsChecked
+                             ? "Inga felkoder i modul 34."
+                             : "Inga felkoder lästa. Läs dem efter en provtur om bilen visar ett fel.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 11)
+                    } else {
+                        ForEach(service.faultCodes, id: \.self) { code in
+                            Text(code)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Palette.ink)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 7)
+                            HairLine()
+                        }
+                    }
+                    Text("Läser bara modul 34. Rensar ingenting.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.muted)
+                        .padding(.horizontal, 13)
+                        .padding(.top, 8)
+                    ActionButton(title: "Läs felkoder", enabled: canReadFaults) {
+                        Task { await service.readFaultCodes() }
+                    }
+                    .padding(11)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("Felkoder")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Spacer(minLength: 8)
+                    Text(service.faultCodes.isEmpty ? "—" : "\(service.faultCodes.count)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(service.faultCodes.isEmpty ? Palette.muted : Palette.amber)
+                }
+            }
+            .tint(Palette.blue)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var canReadFaults: Bool {
+        canRun && service.ecuOpen
     }
 
     // MARK: Details - everything that is only interesting when something is wrong
@@ -333,6 +393,7 @@ struct DiagnosticsView: View {
         header.append("modul 34: " + (service.ecuOpen ? "JA" : "NEJ")
                       + (service.identityProof.isEmpty ? "" : " · " + service.identityProof))
         header.append("identitet: " + (service.identityLine.isEmpty ? "—" : service.identityLine))
+        header.append("normalhöjd: " + service.normalBaselineSummary)
         header.append("status: " + (service.statusLine.isEmpty ? "—" : service.statusLine))
         return transport.exportLog(header: header)
     }
