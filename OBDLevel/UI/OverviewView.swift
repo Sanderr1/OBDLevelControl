@@ -46,7 +46,8 @@ struct OverviewView: View {
 
     private var rideSection: some View {
         VStack(spacing: 10) {
-            SectionHeading(title: "Höj & sänk", trailing: demo.enabled ? "Simulering" : "Live")
+            SectionHeading(title: "Höj & sänk",
+                           trailing: demo.enabled ? "Simulering" : (liveReady ? "Live" : "Offline"))
 
             Card {
                 HStack(spacing: 8) {
@@ -94,12 +95,20 @@ struct OverviewView: View {
         }
     }
 
+    /// A write is only allowed with a live adapter and a verified module 34.
+    /// Otherwise the buttons are visibly dead instead of accepting a tap that
+    /// `runAction` rejects silently.
+    private var liveReady: Bool {
+        transport.ready && service.ecuOpen
+    }
+
     private func bothEnabled(up: Bool) -> Bool {
         if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+        guard liveReady, !service.busy else { return false }
         let role: ActionRole = up ? .raiseHigh : .lowerNormal
-        if service.hasRoutine(role) { return !service.busy }
+        if service.hasRoutine(role) { return true }
         let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
-        return !service.busy && roles.allSatisfy { service.hasRoutine($0) }
+        return roles.allSatisfy { service.hasRoutine($0) }
     }
 
     private func moveBoth(up: Bool) {
@@ -194,6 +203,7 @@ struct OverviewView: View {
                     HairLine()
                     SwitchRow(title: "Nivåreglering",
                               detail: levelOn ? "På" : "Av",
+                              enabled: demo.enabled || liveReady,
                               isOn: Binding(get: { levelOn }, set: { setLevel($0) }))
 
                     HairLine()
@@ -248,7 +258,7 @@ struct OverviewView: View {
 
     private func rideEnabled(_ axle: Axle, up: Bool) -> Bool {
         if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
-        return !service.busy && service.hasRoutine(rideRole(axle, up: up))
+        return liveReady && !service.busy && service.hasRoutine(rideRole(axle, up: up))
     }
 
     private func ride(_ axle: Axle, up: Bool) {
@@ -279,7 +289,7 @@ struct OverviewView: View {
     private func ventEnabled(_ target: VentTarget) -> Bool {
         guard !levelOn else { return false }
         if demo.enabled { return demo.activeVent == nil }
-        return !service.busy && service.canVent(target)
+        return liveReady && !service.busy && service.canVent(target)
     }
 
     private func isVentRunning(_ target: VentTarget) -> Bool {

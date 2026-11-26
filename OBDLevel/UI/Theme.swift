@@ -110,6 +110,7 @@ struct ValueRow: View {
 struct SwitchRow: View {
     let title: String
     var detail: String? = nil
+    var enabled: Bool = true
     @Binding var isOn: Bool
 
     var body: some View {
@@ -117,7 +118,7 @@ struct SwitchRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
+                    .foregroundStyle(enabled ? Palette.ink : Palette.muted)
                 if let detail {
                     Text(detail)
                         .font(.system(size: 11))
@@ -128,6 +129,7 @@ struct SwitchRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .tint(Palette.switchOn)
+                .disabled(!enabled)
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)

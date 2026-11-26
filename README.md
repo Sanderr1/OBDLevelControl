@@ -557,7 +557,7 @@ look connected while every air-suspension DID returns `7F 22 31` (`requestOutOfR
 
 ### Already filled in: EV_AirSuspe 003024
 
-The measuring values that unit lists give five DIDs that do not change between cars:
+The measuring values that unit lists give these DIDs that do not change between cars:
 
 | Value | DID | Bytes | Scale | Unit |
 |---|---|---|---|---|
@@ -565,17 +565,22 @@ The measuring values that unit lists give five DIDs that do not change between c
 | Body height right front wheel house edge | `2590` | 2 | 0.1 | mm |
 | Body height left rear wheel house edge | `2591` | 2 | 0.1 | mm |
 | Body height right rear wheel house edge | `2592` | 2 | 0.1 | mm |
-| System pressure | `2B83` | 2 | 0.01 | bar |
+| System pressure (`actual_signal_pressure_sensor`) | `2B83` | 1 | 0.1 | bar |
+| Compressor temperature | `2B84` | 1 | 0.5 | °C |
+| Calculated compressor temperature | `2B96` | 1 | 0.5 | °C |
+| System status | `2B92` | 1 | 1 | enum |
 
-`LevelProfile.blank` ships with those five, so a fresh install reads heights and pressure without
-a scan. *Inställningar → Autokonfigurering → Kända DID* re-applies them if the profile has been
-edited or the numbers turn out wrong for your car.
+`LevelProfile.blank` ships with the wheels, battery and the three air-system values visible, so a
+fresh install reads heights, pressure and compressor temperature without a scan. **B21 corrects
+the old guesses**: `2B83` is one byte × 0.1 bar, and `2B84`/`2B96` are one byte × 0.5 °C. The
+previous two-byte/0.01 definitions explained why the log showed `2B83=rå 00` and 51 °C instead of
+5 °C. Existing profiles are corrected on launch; *Inställningar → Autokonfigurering → Kända DID*
+re-applies the table.
 
-The rest of the values the module lists are diagnostics rather than measurements and are left out
-on purpose: `1308` activations of the exhaust valve, `1309` car-jack mode, `220D` doors/lids status
-(a bit field, not a number), `282A` Audi drive select (an enum). *Compressor temperature* sits
-below them in the same list — its DID was not visible, so that channel still says `0000` until you
-run the scan or type it in.
+Every other value the module lists (absolute heights, deviations, bellows pressures, drive
+select, door status, …) is still in the profile but **hidden by default**. B21 neither reads nor
+shows it. *System → Dolda värden* lists them with a **Visa** button, and the eye icon on each extra
+row in *Inställningar → Höjdkanaler* toggles it back. Hidden values are kept across restarts.
 
 ### Basic settings in module 34
 
@@ -599,6 +604,14 @@ without scanning:
 Every one uses the option record `04 00 00`. *Vent fram* / *Vent bak* are the same bleeding
 routines as *Sänk fram* / *Sänk bak*. The module ODX contains no `SECURITY-REF`, so basic settings
 need no security access. A `31 03` scan is still useful for routines outside this table.
+
+**The session is the other half of the problem.** `DiagnServi_RoutiContrStartBasicSetti` is linked
+to the development, extended and end-of-line sessions — *not* the default session. The ECU leaves
+the extended session after roughly five seconds without traffic (S3), while plain `22` reads keep
+working in default. That is why a log can show perfect heights at 19:04:57 and then
+`7F 31 7E subFunctionNotSupportedInActiveSession` on the first `31 01` at 19:05:47. **B21 sends
+`10 03` immediately before every start, stop and `31 03` scan, and reopens once if a poll still
+returns `7E`.** `NRC.text` now names `0x7E` instead of showing `unknown`.
 
 ### Automatically
 
@@ -798,11 +811,15 @@ either talks to the adapter or, in demo mode, to a local simulation.
   *Öppna styrenhet*.
 
 **Översikt**
-- Four wheel heights in a 2×2 grid. `Läs nu` reads every channel; `Auto 2 s` repeats it.
+- Four wheel heights in a 2×2 grid. `Läs nu` reads the wheels and battery; `Auto 2 s` repeats it.
+  Hidden extras are never part of this loop.
 - **Höj & sänk** — the quick controls. `Höj` runs `31 01 03DD 04 00 00` (whole car to high level),
   `Sänk` runs `31 01 03E0 04 00 00` (normal level) and then `31 01 03C8 04 00 00` to switch
   self-levelling back on. One tap, both axles. The same card gets a `Stoppa` button while anything
   is running, which sends `31 02` on the next poll instead of waiting out the routine.
+- Both buttons, the per-axle buttons, venting and the level-control switch are disabled unless the
+  adapter is connected **and** module 34 has passed the identity check. The heading says `Offline`
+  instead of `Live` when they cannot work.
 - The folded *Fler kontroller* card still has per-axle `Höj` / `Sänk` (`03CE`/`03CB`/`03CF`/`03CC`)
   and the reservoir routines.
 - *Nivåreglering* is a switch. It sends the routine mapped to `Nivåreglering av` / `på` and keeps
@@ -814,8 +831,10 @@ either talks to the adapter or, in demo mode, to a local simulation.
 **System**
 - **Batteri** at the top: voltage with a colour band (≥12.4 V green, ≥11.8 V amber, below that red)
   and the DID it came from. Missing DID means *run Autokonfigurering* or type it in yourself.
-- One card per channel after the fourth except the battery (defaults: `Systemtryck` in bar,
-  `Kompressortemperatur` in °C).
+- **Luftsystem** shows only the essential values: system pressure, compressor temperature and
+  system status. `Läs luftvärden` reads the visible channels, not the hidden extras.
+- **Dolda värden** lists every extra and a `Visa` button. The value is read once and returns to the
+  grid; it can be hidden again with the eye icon in Inställningar.
 - Compressor state and *Fyll behållare* / *Lufta behållare*, mapped by role.
 
 **Diagnostik**
@@ -832,8 +851,10 @@ either talks to the adapter or, in demo mode, to a local simulation.
   *Kända DID*, *Kör vid anslutning*, and *Skriv över befintliga DID*.
 - *Funktionsmappning*: ten roles → routine pickers. This is what wires the buttons on Översikt
   and System to actual RIDs.
-- Channel editor: name, DID, byte count, scale, unit, signed, add/remove.
-- Routine editor: name, RID, run and stop for any routine (not just mapped ones).
+- Channel editor: name, DID, byte count, scale, unit, signed, add/remove, plus an eye icon that
+  hides or shows an extra value. Hidden values stay in the profile but are not polled.
+- Routine editor: name, RID, run and stop for any routine (not just mapped ones). Both buttons
+  require a verified module 34.
 - *Identifiera rutin*: pick a role and a routine, press *Mät & mappa*. It reads the four heights,
   runs the routine for 8 s, stops it, waits 0,8 s, reads again and reports the movement per corner.
   If the right axle moved ≥5 mm in the right direction the role is assigned automatically —
@@ -1018,6 +1039,32 @@ value or error, and aggregate all failures instead of showing only the last one.
 **Dela** exports the whole retained log (up to 2500 lines) with a header containing the build,
 adapter, link mode, CAN pair and identity result.
 
+### The expired session (B21)
+
+The B20 log finally had the right ECU: `755/7BF`, identity `258F · 2B83 · 2B92`, and heights
+414/414/412/412 mm. Every routine still returned `7F 31 7E` in 60–90 ms.
+
+`DiagnServi_RoutiContrStartBasicSetti` in `EV_AirSuspe_003024` lists the sessions it is valid in:
+**development, extended, end-of-line**. It is not valid in the default session. The ECU's extended
+session has S3 ≈ 5 s (`50 03 00 32 01 F4`), while `22` reads continue to work after it expires —
+which is exactly the sequence in the log: `10 03` at 19:04:55, reads until 19:04:57, first
+`31 01 03D4` at 19:05:47. The app had been sitting in default for 50 seconds.
+
+B21 changes `runRoutine` to send `10 03` immediately before `31 01`, and `stopRoutine` to do the
+same before `31 02`. If a polled `31 03` returns `7E`, the session is reopened once and the poll
+retried. `0x7E` is named `subFunctionNotSupportedInActiveSession (sessionen har gått ut)` instead
+of `unknown`.
+
+B21 also makes the app an air-suspension tool rather than a live-data browser:
+
+- the default profile shows the four heights, battery and system pressure/compressor temperature/
+  system status;
+- every other DID is kept but marked hidden, and is never read or drawn;
+- *System → Dolda värden* and the eye icon in *Inställningar → Höjdkanaler* bring a value back;
+- disconnect clears the last values, so `OFFLINE` no longer shows 414 mm from the previous session;
+- `Höj`, `Sänk`, axle, vent, reservoir and routine buttons are disabled unless the adapter is
+  connected and module 34 is identity-verified.
+
 ### The crash on connect (B15, fixed in B16)
 
 The crash log from the phone is unambiguous, and it is neither a `fatalError` nor a bad index:
@@ -1096,11 +1143,11 @@ This is a diagnostic tool, not a toy. A wrong RID can command a valve or a compr
   session manager on top.
 - **No background operation.** iOS suspends BLE when the app leaves the foreground unless you add
   the bluetooth-central background mode, which this doesn't declare.
-- **B20 not yet confirmed on the car.** B16 proved BLE, `10 03`, `3E 00` and DID reads on the A6,
-  but on the wrong pair (`714/77E`, the cluster); B19 waited out `7F xx 78` correctly but still used
-  that pair. B20 moves module 34 to `755/7BF` and refuses to call the ECU open until a
-  module-34-specific DID answers. The whole-car level routines still await their first successful
-  live run. Treat the first `Höj` / `Sänk` as a test.
+- **B21 not yet confirmed on the car.** B20 proved the right ECU (`755/7BF`, identity
+  `258F · 2B83 · 2B92`) and correct heights on the A6, but every routine returned `7F 31 7E`
+  because the extended session had expired. B21 reopens `10 03` before every routine. The whole-car
+  level routines still await their first successful live run; treat the first `Höj` / `Sänk` as a
+  test and copy the log whatever happens.
 
 ---
 

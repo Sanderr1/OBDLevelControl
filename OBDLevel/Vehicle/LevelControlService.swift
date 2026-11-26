@@ -108,6 +108,11 @@ struct HeightChannel: Codable, Identifiable, Hashable {
     var offset: Double
     var signed: Bool
     var unit: String?
+    /// B21: extras are kept in the profile but not read or shown until the user
+    /// asks for them. Nil means visible, so old profiles decode unchanged.
+    var hidden: Bool?
+
+    var isHidden: Bool { hidden ?? false }
 
     func decode(_ data: [UInt8]) -> Double? {
         guard data.count >= length, length > 0, length <= 4 else { return nil }
@@ -150,6 +155,9 @@ struct KnownDID {
     let scale: Double
     let unit: String?
     var signed: Bool = false
+    /// Shown and read on the System tab by default. Everything else is an extra
+    /// that the user can switch on again.
+    var essential: Bool = false
 }
 
 struct LevelProfile: Codable {
@@ -167,14 +175,17 @@ struct LevelProfile: Codable {
     /// Live data as the module lists it. Heights first on purpose: the overview reads
     /// the first four channels and calls them the wheels.
     static let knownDIDs: [KnownDID] = [
-        KnownDID(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, unit: "mm", essential: true),
+        KnownDID(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, unit: "mm", essential: true),
+        KnownDID(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, unit: "mm", essential: true),
+        KnownDID(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, unit: "mm", essential: true),
 
-        KnownDID(name: "Systemtryck", did: 0x2B83, length: 2, scale: 0.01, unit: "bar"),
-        KnownDID(name: "Kompressortemperatur", did: 0x2B84, length: 1, scale: 1, unit: "°C"),
-        KnownDID(name: "Beräknad kompressortemp", did: 0x2B96, length: 2, scale: 0.1, unit: "°C"),
+        // Lengths and scales from EV_AirSuspe_003024: 2B83 is one byte × 0.1 bar,
+        // 2B84/2B96 are one byte × 0.5 °C, 2B92 is one status byte. The old
+        // two-byte/0.01 guesses made every value show as "rå" or 10× too high.
+        KnownDID(name: "Systemtryck", did: 0x2B83, length: 1, scale: 0.1, unit: "bar", essential: true),
+        KnownDID(name: "Kompressortemperatur", did: 0x2B84, length: 1, scale: 0.5, unit: "°C", essential: true),
+        KnownDID(name: "Beräknad kompressortemp", did: 0x2B96, length: 1, scale: 0.5, unit: "°C"),
         KnownDID(name: "Kompressor omgivningstemp", did: 0x2B97, length: 2, scale: 0.1, unit: "°C"),
 
         KnownDID(name: "Absolut höjd VF", did: 0x2B8E, length: 2, scale: 0.1, unit: "mm"),
@@ -192,9 +203,9 @@ struct LevelProfile: Codable {
         KnownDID(name: "Nivåtryck VB", did: 0x1234, length: 2, scale: 0.1, unit: "hPa"),
         KnownDID(name: "Nivåtryck HB", did: 0x1236, length: 2, scale: 0.1, unit: "hPa"),
 
-        KnownDID(name: "Systemstatus", did: 0x2B92, length: 2, scale: 1, unit: nil),
-        KnownDID(name: "Nivåregulator villkor", did: 0x2B93, length: 2, scale: 1, unit: nil),
-        KnownDID(name: "Börvärde nivå", did: 0x2B94, length: 2, scale: 0.1, unit: "mm"),
+        KnownDID(name: "Systemstatus", did: 0x2B92, length: 1, scale: 1, unit: nil, essential: true),
+        KnownDID(name: "Nivåregulator villkor", did: 0x2B93, length: 1, scale: 1, unit: nil),
+        KnownDID(name: "Börvärde nivå", did: 0x2B94, length: 1, scale: 1, unit: nil),
 
         KnownDID(name: "Börvärdeavvikelse VF", did: 0x2B98, length: 2, scale: 0.1, unit: "mm", signed: true),
         KnownDID(name: "Börvärdeavvikelse HF", did: 0x2B99, length: 2, scale: 0.1, unit: "mm", signed: true),
@@ -234,7 +245,8 @@ struct LevelProfile: Codable {
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
         var channels = knownDIDs.map {
             HeightChannel(name: $0.name, did: $0.did, length: $0.length, scale: $0.scale,
-                          offset: 0, signed: $0.signed, unit: $0.unit)
+                          offset: 0, signed: $0.signed, unit: $0.unit,
+                          hidden: $0.essential ? nil : true)
         }
         channels.append(battery)
         let actions = knownActions.map {
@@ -384,6 +396,8 @@ final class LevelControlService: ObservableObject {
         }
 
         applyKnownActions(&profile)
+        applyKnownMetadata(&profile)
+        applyKnownVisibility(&profile)
 
         // Every profile gets exactly one battery channel, once.
         if let id = profile.battery, profile.channels.contains(where: { $0.id == id }) { return }
@@ -397,6 +411,38 @@ final class LevelControlService: ObservableObject {
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
         profile.channels.append(channel)
         profile.battery = channel.id
+    }
+
+    /// B20 and older stored guessed lengths/scales for some live values. B21
+    /// replaces them with the definitions in EV_AirSuspe_003024 so an existing
+    /// install does not need a profile reset to show pressure and temperature
+    /// correctly.
+    private static func applyKnownMetadata(_ profile: inout LevelProfile) {
+        for i in profile.channels.indices {
+            guard profile.channels[i].did != 0,
+                  let known = LevelProfile.knownDIDs.first(where: {
+                      $0.did == profile.channels[i].did
+                  }) else { continue }
+            profile.channels[i].length = known.length
+            profile.channels[i].scale = known.scale
+            profile.channels[i].offset = 0
+            profile.channels[i].signed = known.signed
+            profile.channels[i].unit = known.unit
+        }
+    }
+
+    /// B21: the app is an air-suspension controller, not a live-data browser.
+    /// Hide the known extra values once; heights, battery and the three air-system
+    /// values stay visible. A hidden channel is never read until the user shows it
+    /// again from System or Settings.
+    private static func applyKnownVisibility(_ profile: inout LevelProfile) {
+        let essential = Set(LevelProfile.knownDIDs.filter(\.essential).map(\.did))
+        let hideable = Set(LevelProfile.knownDIDs.map(\.did).filter { !essential.contains($0) })
+        for i in profile.channels.indices where profile.channels[i].hidden == nil {
+            if hideable.contains(profile.channels[i].did) {
+                profile.channels[i].hidden = true
+            }
+        }
     }
 
     /// Fills in the RID:s confirmed by the module ODX without touching anything the
@@ -479,6 +525,11 @@ final class LevelControlService: ObservableObject {
         identityProof = ""
         identityLine = ""
         statusLine = "Adaptern frånkopplad"
+        // Old heights under OFFLINE look like live data. Clear them so the next
+        // session starts from "–" instead of yesterday's 414 mm.
+        readings = profile.channels.map {
+            HeightReading(name: $0.name, did: $0.did, value: nil, raw: "–")
+        }
     }
 
     // MARK: Self test
@@ -659,7 +710,8 @@ final class LevelControlService: ObservableObject {
             } else {
                 built.append(HeightChannel(name: known.name, did: known.did,
                                            length: known.length, scale: known.scale,
-                                           offset: 0, signed: known.signed, unit: known.unit))
+                                           offset: 0, signed: known.signed, unit: known.unit,
+                                           hidden: known.essential ? nil : true))
             }
             lines.append(String(format: "%@ %04X", known.name, known.did))
         }
@@ -725,11 +777,15 @@ final class LevelControlService: ObservableObject {
     func autoFindRoutines(from start: UInt16, count: Int) async {
         await run("letar rutiner") {
             self.discoveredRoutines.removeAll()
+            // `31 03` is also a routine request and needs the extended session.
+            _ = await self.ecu.reopenSession()
             var newActions: [RoutineAction] = []
             for i in 0..<count {
                 let rid = start &+ UInt16(i)
                 self.autoProgress = String(format: "%04X  (%d/%d)", rid, i + 1, count)
-                if let response = try? await self.ecu.routineResults(rid), !response.isEmpty {
+                do {
+                    let response = try await self.ecu.routineResults(rid)
+                    guard !response.isEmpty else { continue }
                     self.discoveredRoutines.append(String(format: "%04X: %@", rid, response.hex))
                     if self.discoveredRoutines.count > 300 {
                         self.discoveredRoutines.removeFirst(self.discoveredRoutines.count - 300)
@@ -742,6 +798,10 @@ final class LevelControlService: ObservableObject {
                                                         parameters: [],
                                                         role: nil))
                     }
+                } catch OBDError.nrc(let code) where code == 0x7E {
+                    _ = await self.ecu.reopenSession()
+                } catch {
+                    continue
                 }
                 if i % 8 == 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
             }
@@ -944,7 +1004,13 @@ final class LevelControlService: ObservableObject {
         await read(fastChannels, label: "läser höjder")
     }
 
-    /// Reads every channel the profile has, including the system values.
+    /// Reads only what the air-suspension screen shows. Hidden extras are left
+    /// alone until the user turns them on again.
+    func readVisibleChannels() async {
+        await read(profile.channels.filter { !$0.isHidden }, label: "läser luftfjädring")
+    }
+
+    /// Diagnostics-only: every channel, hidden ones included.
     func readAllChannels() async {
         await read(profile.channels, label: "läser alla kanaler")
     }
@@ -998,7 +1064,8 @@ final class LevelControlService: ObservableObject {
                 }
             }
             self.readings = out
-            self.ecuOpen = self.ecuOpen || out.contains(where: { $0.value != nil })
+            // Do not promote `ecuOpen` from a successful read: only a
+            // module-34-specific identity DID may unlock the routine buttons.
             if !detail.isEmpty {
                 self.transport.note("\(label): " + detail.joined(separator: " · "))
             }
@@ -1029,10 +1096,41 @@ final class LevelControlService: ObservableObject {
         return readings[index]
     }
 
-    /// Everything after the fourth channel except the battery, which has its own card.
+    /// Visible values after the fourth channel except the battery, which has its
+    /// own card.
     var systemChannels: [HeightChannel] {
         let batteryID = batteryChannel?.id
-        return profile.channels.dropFirst(4).filter { $0.id != batteryID }
+        return profile.channels.dropFirst(4).filter { $0.id != batteryID && !$0.isHidden }
+    }
+
+    /// Values the user has hidden but can switch on again. The four heights and
+    /// the battery are never in this list.
+    var hiddenChannels: [HeightChannel] {
+        let batteryID = batteryChannel?.id
+        return profile.channels.dropFirst(4).filter { $0.id != batteryID && $0.isHidden }
+    }
+
+    /// Only extra channels may be hidden; the overview always needs the wheels.
+    func isExtraChannel(_ channel: HeightChannel) -> Bool {
+        guard let index = profile.channels.firstIndex(where: { $0.id == channel.id }),
+              index >= 4 else { return false }
+        return channel.id != batteryChannel?.id
+    }
+
+    func setChannelHidden(_ id: UUID, _ hidden: Bool) {
+        guard let index = profile.channels.firstIndex(where: { $0.id == id }),
+              index >= 4 else { return }
+        // Store `false` explicitly when the user shows a channel. `nil` is the
+        // "not migrated yet" state that applyKnownVisibility may still hide.
+        profile.channels[index].hidden = hidden
+    }
+
+    /// Turn one extra value back on and read it once, so the user sees whether it
+    /// actually answers before leaving it visible.
+    func showChannel(_ id: UUID) async {
+        setChannelHidden(id, false)
+        guard let channel = profile.channels.first(where: { $0.id == id }) else { return }
+        await read([channel], label: "läser \(channel.name)")
     }
 
     func action(for role: ActionRole) -> RoutineAction? {

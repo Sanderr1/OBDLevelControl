@@ -293,7 +293,8 @@ struct SettingsView: View {
 
     private var channelSection: some View {
         VStack(spacing: 10) {
-            SectionHeading(title: "Höjdkanaler", trailing: "\(service.profile.channels.count) st")
+            SectionHeading(title: "Höjdkanaler",
+                           trailing: "\(service.profile.channels.count) st · \(service.hiddenChannels.count) dolda")
             Card {
                 ForEach($service.profile.channels) { $channel in
                     VStack(spacing: 8) {
@@ -313,6 +314,18 @@ struct SettingsView: View {
                                                                  set: { UInt16(truncatingIfNeeded: $0) }),
                                      digits: 4)
                                 .frame(width: 92)
+
+                            if service.isExtraChannel(channel) {
+                                Button {
+                                    service.setChannelHidden(channel.id, !channel.isHidden)
+                                } label: {
+                                    Image(systemName: channel.isHidden ? "eye.slash" : "eye")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(channel.isHidden ? Palette.muted : Palette.blue)
+                                        .frame(width: 26, height: 30)
+                                }
+                                .buttonStyle(.plain)
+                            }
 
                             Button {
                                 service.removeChannel(channel.id)
@@ -419,12 +432,12 @@ struct SettingsView: View {
                                 .foregroundStyle(action.role == nil ? Palette.amber : Palette.muted)
                             Spacer(minLength: 8)
                             ActionButton(title: "Kör",
-                                         enabled: !service.busy && action.rid != 0) {
+                                         enabled: transport.ready && service.ecuOpen && !service.busy && action.rid != 0) {
                                 Task { await service.runAction(action) }
                             }
                             .frame(width: 82)
                             ActionButton(title: "Stopp",
-                                         enabled: !service.busy && action.rid != 0) {
+                                         enabled: transport.ready && service.ecuOpen && !service.busy && action.rid != 0) {
                                 Task { await service.stopAction(action) }
                             }
                             .frame(width: 82)
@@ -491,7 +504,7 @@ struct SettingsView: View {
 
                 HStack(spacing: 8) {
                     ActionButton(title: "Mät & mappa",
-                                 enabled: transport.ready && !service.busy && testActionID != nil) {
+                                 enabled: transport.ready && service.ecuOpen && !service.busy && testActionID != nil) {
                         if let action = service.profile.actions.first(where: { $0.id == testActionID }) {
                             Task { await service.identify(action, role: testRole) }
                         }
@@ -612,7 +625,7 @@ struct SettingsView: View {
     }
 
     private var scanEnabled: Bool {
-        transport.ready && !service.busy
+        transport.ready && service.ecuOpen && !service.busy
     }
 
     // MARK: Demo

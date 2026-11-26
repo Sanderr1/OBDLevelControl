@@ -237,6 +237,26 @@ final class ECUConnection {
         _ = try? await send([0x3E, 0x00])
     }
 
+    /// `31 01` (start basic setting) and `31 03` (results) are only valid in the
+    /// development, extended or end-of-line session according to the module ODX.
+    /// The ECU drops back to the default session after about five seconds without
+    /// traffic (S3), while plain `22` reads keep working there. That is why a good
+    /// read pass can be followed by `7F 31 7E` on the first routine: the session
+    /// that was opened at connect time is long gone. Re-open it right before the
+    /// routine instead of trusting an earlier `10 03`.
+    @discardableResult
+    func reopenSession(timeout: TimeInterval = 3) async -> Bool {
+        do {
+            let response = try await send([0x10, sessionType], retries: 0, timeout: timeout)
+            let ok = response.first == 0x50
+            transport.note("session: 10 03 " + (ok ? "öppnad före rutin" : "oväntat svar " + response.hex))
+            return ok
+        } catch {
+            transport.note("session: 10 03 misslyckades · " + Self.short(error))
+            return false
+        }
+    }
+
     // MARK: Data
 
     func readDID(_ did: UInt16, timeout: TimeInterval = 5) async throws -> [UInt8] {
@@ -261,7 +281,9 @@ final class ECUConnection {
     }
 
     func stopRoutine(_ rid: UInt16, parameters: [UInt8] = []) async throws -> [UInt8] {
-        try await send([0x31, 0x02, UInt8(rid >> 8), UInt8(rid & 0xFF)] + parameters)
+        // Stop is a routine request too, so it needs the same session as start.
+        _ = await reopenSession()
+        return try await send([0x31, 0x02, UInt8(rid >> 8), UInt8(rid & 0xFF)] + parameters)
     }
 
     func routineResults(_ rid: UInt16) async throws -> [UInt8] {
@@ -277,6 +299,12 @@ final class ECUConnection {
                     shouldStop: (() -> Bool)? = nil,
                     progress: ((String) -> Void)? = nil) async throws -> [UInt8] {
 
+        // Without a fresh extended session the ECU answers exactly
+        // `7F 31 7E subFunctionNotSupportedInActiveSession`, which is what every
+        // B20 routine got after the read pass had been idle for 50 s.
+        guard await reopenSession() else {
+            throw OBDError.badResponse("kunde inte öppna 10 03 före 31 01")
+        }
         let started = try await startRoutine(rid, parameters: parameters)
         guard started.first == 0x71 else { throw OBDError.badResponse(started.hex) }
         progress?("routine started")
@@ -297,6 +325,12 @@ final class ECUConnection {
             } catch OBDError.nrc(let code) where code == 0x23 || code == 0x21 {
                 progress?("still running")
                 continue
+            } catch OBDError.nrc(let code) where code == 0x7E {
+                // The session timed out between polls (for example a very slow
+                // adapter). `31 03` only reads, so reopening and asking again is safe.
+                progress?("sessionen gick ut, öppnar 10 03 igen")
+                if await reopenSession() { continue }
+                throw OBDError.nrc(code)
             }
             progress?("results " + last.hex)
 

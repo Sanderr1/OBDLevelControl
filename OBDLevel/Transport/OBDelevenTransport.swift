@@ -43,6 +43,8 @@ enum NRC {
         case 0x37: return "requiredTimeDelayNotExpired"
         case 0x72: return "generalProgrammingFailure"
         case 0x78: return "responsePending"
+        case 0x7E: return "subFunctionNotSupportedInActiveSession (sessionen har gått ut)"
+        case 0x7F: return "serviceNotSupportedInActiveSession (fel session)"
         default: return "unknown"
         }
     }
