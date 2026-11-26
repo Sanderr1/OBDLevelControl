@@ -51,7 +51,9 @@ struct DiagnosticsView: View {
                          value: String(format: "%03X → %03X", service.profile.txId, service.profile.rxId))
                 HairLine()
                 ValueRow(title: "Modul 34 svarar",
-                         value: service.ecuOpen ? "Ja" : "Nej",
+                         value: service.ecuOpen
+                         ? (service.identityProof.isEmpty ? "Ja" : "Ja · " + service.identityProof)
+                         : "Nej",
                          valueColor: service.ecuOpen ? Palette.green : Palette.amber)
                 HairLine()
                 HStack(spacing: 8) {
@@ -101,6 +103,10 @@ struct DiagnosticsView: View {
                              : "—")
                     HairLine()
                     ValueRow(title: "Protokoll", value: "UDS · ISO-TP")
+                    HairLine()
+                    ValueRow(title: "Identitet",
+                             value: service.identityLine.isEmpty ? "—" : service.identityLine,
+                             valueColor: service.ecuOpen ? Palette.green : Palette.muted)
                     HairLine()
                     ValueRow(title: "App", value: AppInfo.build)
                 }
@@ -257,12 +263,17 @@ struct DiagnosticsView: View {
             DisclosureGroup(isExpanded: $showLog) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
-                        Text("\(transport.log.count) rader")
+                        Text("\(transport.logTotal) rader")
                             .font(.system(size: 10))
                             .foregroundStyle(Palette.muted)
                         Spacer(minLength: 8)
-                        Button(copied ? "Kopierat" : "Kopiera") {
-                            UIPasteboard.general.string = transport.log.suffix(300).joined(separator: "\n")
+                        ShareLink(item: exportText) {
+                            Text("Dela")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Palette.blue)
+                        }
+                        Button(copied ? "Kopierat" : "Kopiera allt") {
+                            UIPasteboard.general.string = exportText
                             copied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                         }
@@ -299,6 +310,31 @@ struct DiagnosticsView: View {
 
     private var recentLog: [String] {
         Array(transport.log.suffix(24))
+    }
+
+    /// The copy/share payload: everything retained, not just the visible tail,
+    /// with a header that identifies the build, the CAN pair and the identity proof.
+    private var exportText: String {
+        let now = Date().formatted(date: .numeric, time: .standard)
+        var header: [String] = []
+        header.append("OBDLevel \(AppInfo.build)" + (demo.enabled ? " · DEMO" : ""))
+        header.append("tid: \(now)")
+        header.append("adapter: \(adapterText)")
+        header.append("länk: " + (transport.ready
+                                  ? "\(transport.charInfo) · \(transport.wireMode) · \(transport.linkModeText)"
+                                  : "—"))
+        let applied = transport.canPairText
+        if applied == "—" {
+            header.append(String(format: "CAN: %03X→%03X (profil, ej tillämpat denna gång)",
+                                 service.profile.txId, service.profile.rxId))
+        } else {
+            header.append("CAN: \(applied) (\(service.profile.idWidth ?? 4) byte)")
+        }
+        header.append("modul 34: " + (service.ecuOpen ? "JA" : "NEJ")
+                      + (service.identityProof.isEmpty ? "" : " · " + service.identityProof))
+        header.append("identitet: " + (service.identityLine.isEmpty ? "—" : service.identityLine))
+        header.append("status: " + (service.statusLine.isEmpty ? "—" : service.statusLine))
+        return transport.exportLog(header: header)
     }
 
     private func disclosureLabel(_ title: String) -> some View {

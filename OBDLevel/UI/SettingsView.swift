@@ -90,6 +90,18 @@ struct SettingsView: View {
                 }
                 .padding(11)
 
+                HStack(spacing: 8) {
+                    Text("Modul 34: 755 → 7BF")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.muted)
+                    Spacer(minLength: 8)
+                    Text(AppInfo.build)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.muted)
+                }
+                .padding(.horizontal, 13)
+                .padding(.bottom, 10)
+
                 HairLine()
 
                 HStack(spacing: 8) {

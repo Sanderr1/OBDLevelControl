@@ -5,8 +5,12 @@ final class ECUConnection {
 
     let transport: OBDelevenTransport
 
-    var txId: UInt32 = 0x714
-    var rxId: UInt32 = 0x77E
+    /// Module 34 (air suspension) on the C7 platform is `LL_RideContrSysteUDS`:
+    /// request `0x755`, response `0x7BF`. `0x714/0x77E` is the instrument cluster
+    /// (`LL_DashBoardUDS`) and `0x710/0x77A` is the gateway; both answer `22 F1 87`
+    /// but reject every air-suspension DID with NRC 0x31.
+    var txId: UInt32 = 0x755
+    var rxId: UInt32 = 0x7BF
 
     /// 0x03 = extended session, 0x02 = programming, 0x01 = default
     var sessionType: UInt8 = 0x03
@@ -19,7 +23,8 @@ final class ECUConnection {
 
     struct OpenReport {
         var steps: [String]
-        /// True when the ECU answered at least one request, i.e. the CAN ids are right.
+        /// True when the ECU answered at all. This does **not** prove the pair is
+        /// module 34: the cluster and gateway answer `10 03`/`3E 00` too.
         var answered: Bool
         var summary: String { steps.joined(separator: " · ") }
     }
@@ -53,18 +58,65 @@ final class ECUConnection {
         }
 
         transport.note("ECU open tx=\(String(format: "%03X", txId)) rx=\(String(format: "%03X", rxId))"
-                       + (answered ? " answers" : " silent"))
+                       + (answered ? " answers" : " silent")
+                       + " (identitet kontrolleras separat)")
         return OpenReport(steps: steps, answered: answered)
     }
 
-    /// One read-only request used to tell whether the bus and ids are right.
-    func identification() async -> (ok: Bool, detail: String) {
+    // MARK: Identity
+
+    struct ModuleIdentity {
+        var ok = false
+        /// The module-34-specific DIDs that answered, e.g. "258F · 2B83".
+        var proof = ""
+        var steps: [String] = []
+        var summary: String { steps.joined(separator: " · ") }
+    }
+
+    /// Proves that `755/7BF` really is module 34. `22 F1 87` is read for context,
+    /// but it is not proof: the gateway and the instrument cluster answer it too.
+    /// Only a positive answer to a DID from the air-suspension ODX counts.
+    ///
+    /// `fast` stops at the first proof DID. The CAN probe uses it to spend its
+    /// time on the pair, not on producing a complete identity report.
+    func identifyModule34(fast: Bool = false, timeout: TimeInterval = 2) async -> ModuleIdentity {
+        var report = ModuleIdentity()
+
         do {
-            let response = try await send([0x22, 0xF1, 0x87])
-            return (response.first == 0x62, response.isEmpty ? "tomt svar" : response.hex)
+            let data = try await readDID(0xF187, timeout: timeout)
+            report.steps.append("F187 = " + Self.text(data))
         } catch {
-            return (false, Self.short(error))
+            report.steps.append("F187 → " + Self.short(error))
         }
+
+        var proof: [String] = []
+        for did in [UInt16(0x258F), 0x2B83, 0x2B92] {
+            do {
+                let data = try await readDID(did, timeout: timeout)
+                report.ok = true
+                proof.append(String(format: "%04X", did))
+                report.steps.append(String(format: "%04X = %@", did, data.hex))
+                if fast { break }
+            } catch {
+                report.steps.append(String(format: "%04X → %@", did, Self.short(error)))
+            }
+        }
+        report.proof = proof.joined(separator: " · ")
+
+        transport.note("modul 34 identitet: " + (report.ok ? "JA" : "NEJ")
+                       + " · " + report.summary)
+        return report
+    }
+
+    /// F187 is usually ASCII (part number, VIN or similar). Non-printable bytes
+    /// become `·` so a binary identity value is still readable in the log.
+    static func text(_ bytes: [UInt8]) -> String {
+        let chars = bytes.map { byte -> Character in
+            if byte >= 0x20 && byte <= 0x7E { return Character(UnicodeScalar(byte)) }
+            return "·"
+        }
+        let value = String(chars).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? bytes.hex : value
     }
 
     static func short(_ error: Error) -> String {
@@ -76,23 +128,108 @@ final class ECUConnection {
 
     @discardableResult
     func send(_ payload: [UInt8], retries: Int = 3, timeout: TimeInterval = 5) async throws -> [UInt8] {
+        let started = Date()
+        let what = Self.describe(payload)
         var attempt = 0
-        while true {
-            let response = try await transport.uds(payload, timeout: timeout)
 
-            if response.count >= 3, response[0] == 0x7F {
-                let code = response[2]
-                if (code == 0x21 || code == 0x23), attempt < retries {
+        while true {
+            let outcome: Result<[UInt8], Error>
+            do { outcome = .success(try await transport.uds(payload, timeout: timeout)) }
+            catch { outcome = .failure(error) }
+
+            switch outcome {
+            case .failure(let error):
+                log(payload, what, response: nil, error: error, started: started)
+                throw error
+
+            case .success(let response):
+                if response.count >= 3, response[0] == 0x7F,
+                   response[2] == 0x21 || response[2] == 0x23,
+                   attempt < retries {
                     attempt += 1
+                    let nrc = response[2]
+                    log(payload, what, response: response, error: nil, started: started,
+                        extra: String(format: "NRC 0x%02X %@, retry %d/%d",
+                                      nrc, NRC.text(nrc), attempt, retries))
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     continue
                 }
-                throw OBDError.nrc(code)
+
+                log(payload, what, response: response, error: nil, started: started)
+
+                if response.count >= 3, response[0] == 0x7F {
+                    throw OBDError.nrc(response[2])
+                }
+                // `21 00` is the adapter saying "request sent, nothing came back".
+                // Treating it as a successful empty answer made the ECU look open.
+                if response.isEmpty { throw OBDError.badResponse("tomt svar (inget från modulen)") }
+                return response
             }
-            // `21 00` is the adapter saying "request sent, nothing came back".
-            // Treating it as a successful empty answer made the ECU look open.
-            if response.isEmpty { throw OBDError.badResponse("tomt svar (inget från modulen)") }
-            return response
+        }
+    }
+
+    /// One line per logical request with everything needed to debug it later:
+    /// direction pair, service, decoded DID/RID, raw bytes, NRC name and elapsed
+    /// time. Retries are logged as their own line.
+    private func log(_ payload: [UInt8], _ what: String, response: [UInt8]?,
+                     error: Error?, started: Date, extra: String? = nil) {
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        var line = String(format: "%03X→%03X  %@  %@  → ", txId, rxId, payload.hex, what)
+        if let response, !response.isEmpty {
+            line += response.hex
+        } else if error == nil {
+            line += "tomt svar"
+        } else {
+            line += "—"
+        }
+        if let error {
+            if let obd = error as? OBDError, case .nrc(let code) = obd {
+                line += String(format: "  · NRC 0x%02X %@", code, NRC.text(code))
+            } else {
+                line += "  · " + Self.short(error)
+            }
+        }
+        if let extra { line += "  · " + extra }
+        line += "  · \(ms) ms"
+        transport.note(line)
+    }
+
+    static func describe(_ payload: [UInt8]) -> String {
+        guard let service = payload.first else { return "tom" }
+        switch service {
+        case 0x10:
+            guard payload.count >= 2 else { return "DiagnosticSessionControl" }
+            return String(format: "DiagnosticSessionControl session %02X", payload[1])
+        case 0x11: return "ECUReset"
+        case 0x14: return "ClearDiagnosticInformation"
+        case 0x19: return "ReadDTCInformation"
+        case 0x22:
+            guard payload.count >= 3 else { return "ReadDataByIdentifier" }
+            return String(format: "ReadDataByIdentifier DID %02X%02X", payload[1], payload[2])
+        case 0x27:
+            guard payload.count >= 2 else { return "SecurityAccess" }
+            return String(format: "SecurityAccess level %02X", payload[1])
+        case 0x28: return "CommunicationControl"
+        case 0x2E:
+            guard payload.count >= 3 else { return "WriteDataByIdentifier" }
+            return String(format: "WriteDataByIdentifier DID %02X%02X", payload[1], payload[2])
+        case 0x2F:
+            guard payload.count >= 4 else { return "InputOutputControlByIdentifier" }
+            return String(format: "InputOutputControlByIdentifier DID %02X%02X control %02X",
+                          payload[1], payload[2], payload[3])
+        case 0x31:
+            guard payload.count >= 4 else { return "RoutineControl" }
+            let sub: String
+            switch payload[1] {
+            case 0x01: sub = "start"
+            case 0x02: sub = "stop"
+            case 0x03: sub = "results"
+            default: sub = String(format: "sub %02X", payload[1])
+            }
+            return String(format: "RoutineControl %@ RID %02X%02X", sub, payload[2], payload[3])
+        case 0x3E: return "TesterPresent"
+        case 0x85: return "ControlDTCSetting"
+        default: return String(format: "service %02X", service)
         }
     }
 
@@ -106,6 +243,13 @@ final class ECUConnection {
         let response = try await send([0x22, UInt8(did >> 8), UInt8(did & 0xFF)], timeout: timeout)
         guard response.count >= 3, response[0] == 0x62 else {
             throw OBDError.badResponse(response.hex)
+        }
+        // A positive answer must echo the DID that was asked for. Without this
+        // check a stray `62` from another request looks like a valid value.
+        let echoed = UInt16(response[1]) << 8 | UInt16(response[2])
+        guard echoed == did else {
+            throw OBDError.badResponse(String(format: "DID-eko %04X ≠ %04X: %@",
+                                              echoed, did, response.hex))
         }
         return Array(response[3...])
     }

@@ -167,8 +167,8 @@ response  22 <err> <data...>
 
 | sub | meaning | payload |
 |---|---|---|
-| `00` | CAN receive filter (rx id) | 4 bytes, big-endian CAN id |
-| `01` | CAN transmit id (tx id) | 4 bytes, big-endian CAN id |
+| `00` | CAN receive filter (rx id) | 4 bytes, little-endian CAN id |
+| `01` | CAN transmit id (tx id) | 4 bytes, little-endian CAN id |
 
 Confirmed in `SetCanFilterUC` (`"00" + id`) and `SetCanTxIdUC` (`"01" + id`). Response has **no
 length field** — the whole remainder of the frame after `err` is the payload. Send these one at a
@@ -543,9 +543,13 @@ The Chassis Control module reports itself as:
 | ODX | `EV_AirSuspe` 003024 |
 | System | J197, `LUFE-DAEMPFER` |
 
-That gives the whole transport: physical request `714`, response `77E`, ISO-TP, UDS — exactly the
+That gives the whole transport: physical request `755`, response `7BF`, ISO-TP, UDS — exactly the
 profile default. The name→ID map for that unit is inside `EV_AirSuspe` 003024, which is downloaded
 per car and never shipped. Nothing here can enumerate it offline.
+
+`714/77E` is **not** module 34: it is the instrument cluster (`LL_DashBoardUDS`), and `710/77A` is
+the gateway (`LL_GatewUDS`). Both answer `10 03`, `3E 00` and `22 F187`, which is why an app can
+look connected while every air-suspension DID returns `7F 22 31` (`requestOutOfRange`).
 
 ---
 
@@ -663,9 +667,11 @@ height sensor PWM, `2B89` MMI status.
 BLE connected only means the adapter answered. If the app says `Modul 34 svarar inte`, or
 **Testa anslutning** stops before `22 F1 87`:
 
-1. **Inställningar → Hitta CAN-id.** It tries `714→77E` in both 4- and 2-byte form and in both
-   directions, with one read-only `22 F1 87` per candidate. It never tries another control unit.
-   The winner is written to the profile and applied to the adapter before the probe returns.
+1. **Inställningar → Hitta CAN-id.** It tries `755→7BF` in both 4- and 2-byte form and in both
+   directions. A candidate only wins when one of the module-34-specific DIDs `258F`, `2B83` or
+   `2B92` answers positively; `10 03`, `3E 00` and `22 F187` are answered by the cluster and
+   gateway too and are **not** proof. It never tries another control unit. The winner is written to
+   the profile and applied to the adapter before the probe returns.
 2. If nothing answers, the module is not on the bus you are talking to. Check ignition, that the
    adapter is fully seated, and that no other app (OBDeleven, Car Scanner) holds the BLE link.
 3. The log in **Diagnostik** shows every `>` frame. Every byte that comes back is logged as
@@ -703,6 +709,40 @@ Every decoded reply is logged as `< …`. The adapter's own error byte is the se
 A reply that carries an error byte and no length (`21 FE`, `21 01`) is a complete answer and is
 surfaced at once. A bare `21 00` is **not** an answer — it is the ACK that precedes every response,
 and dropping it is what lets a silent-looking module suddenly work.
+
+### B20 log format
+
+B20 adds one semantic line per UDS request on top of the raw `>` / `<` / `rx` frames:
+
+```
+18:30:04.812 755→7BF  22 25 8F  ReadDataByIdentifier DID 258F  → 62 25 8F 09 B0  · 41 ms
+18:30:04.901 755→7BF  22 2B 83  ReadDataByIdentifier DID 2B83  → 7F 22 31  · NRC 0x31 requestOutOfRange  · 44 ms
+18:30:05.002 755→7BF  22 2B 92  ReadDataByIdentifier DID 2B92  → —  · No response (timeout)  · 2000 ms
+```
+
+The fields, in order: timestamp, current TX→RX pair, request hex, decoded service and DID/RID,
+response hex (or `—`), NRC name or error, elapsed milliseconds. A `7F xx 78` wait is logged as
+`responsePending, väntar på slutsvar` without resending. Identity probes log every DID and the
+final `JA`/`NEJ`, so a copied log shows both *which* ECU answered and *which* DIDs proved it.
+
+Every read pass also writes one line with all channels:
+
+```
+18:30:06.220 läser höjder: Vänster fram 258F=412.0mm · Höger fram 2590=410.5mm · … · Batterispänning 0000=✗ NRC 0x31 requestOutOfRange
+```
+
+**Kopiera allt** / **Dela** in Diagnostik exports the full retained log (2500 lines) with a header:
+
+```
+OBDLevel B20 · modul 34
+tid: 2026-11-26 18:30:06
+adapter: OBDeleven · gen 3
+länk: FFE1 writeNoResp+notify · ramad · med kvittens
+CAN: 755→7BF (4 byte)
+modul 34: JA · 258F · 2B83
+identitet: F187 = 4G0907553F · 258F = 09 B0 · 2B83 = 00 00 · 2B92 = 00 01
+status: Modul 34 öppen · …
+```
 
 ---
 
@@ -924,7 +964,8 @@ For anyone reproducing or extending this, the Android classes that revealed each
 | No devices in scan | adapter is 1st gen, or not powered | 1st gen won't work on iOS; plug into OBD port for power |
 | `bluetooth state 5` (unauthorized) | permission denied | Settings → Privacy → Bluetooth → allow the app |
 | Connects, `ready` never true | `FFE1` not found | dongle firmware mismatch — update it via OBDeleven on Android once |
-| Everything times out | wrong TX/RX ids, or the adapter is still filtered on another module's pair | module 34 is `714`/`77E`; press *Hitta CAN-id* (B19 tests only module 34) and then *Öppna styrenhet* |
+| Everything times out | wrong TX/RX ids, or the adapter is still filtered on another module's pair | module 34 is `755`/`7BF`; press *Hitta CAN-id* (B20 tries only module 34 and requires a module-34 DID) and then *Öppna styrenhet* |
+| `Modul 34 svarar` is true but every DID returns `NRC 0x31` | the pair is answering, but it is the cluster `714/77E` or gateway `710/77A` | B20: switch to `755/7BF` and only trust `258F`/`2B83`/`2B92`, not `10 03` or `22 F187` |
 | VIN or a `31 01` reply shows up as `osoliciterat svar` | ECU sent `7F xx 78` (responsePending) and the app stopped waiting | fixed in B19: the transport waits for the final frame without resending |
 | `NRC 0x7F 0x22 conditionsNotCorrect` | ignition off, hood closed, engine state | ignition on, hood open if the routine needs it |
 | `NRC 0x33 securityAccessDenied` | ECU wants seed/key | supply the key algorithm |
@@ -950,6 +991,32 @@ B19 fixes both: the probe only tries `714/77E` (both byte widths and both direct
 winner before returning, and the transport keeps waiting through any number of `7F xx 78` frames
 without resending the request. A profile that already saved `710/77A` is moved back to `714/77E`
 on launch.
+
+### The wrong ECU (B20)
+
+B19 improved the wire handling but the car still answered every air-suspension DID with
+`7F 22 31 requestOutOfRange`. The B19 log is actually consistent: the app was talking, but to the
+instrument cluster.
+
+- The VAG UDS table maps `LL_RideContrSysteUDS` (the base variant in `EV_AirSuspe_003024`) to
+  request `0x755`, response `0x7BF`.
+- `0x714/0x77E` is `LL_DashBoardUDS`, the instrument cluster. `0x710/0x77A` is `LL_GatewUDS`.
+- The cluster and gateway happily answer `10 03`, `3E 00` and `22 F187`, so those cannot be used
+  as "module 34 is here". Only a DID that exists in the air-suspension ODX can.
+
+B20 changes the default and migrates saved `710/77A` and `714/77E` profiles to `755/7BF`. The CAN
+probe tries only `755/7BF` (both widths, both directions) and accepts a candidate only after
+`22 258F`, `22 2B83` or `22 2B92` returns a positive `62` with the same DID echoed. `Öppna
+styrenhet` runs the same identity check; `ecuOpen`/`Modul 34 svarar` stays false if only `10 03` or
+`F187` answered. Routine buttons (`Höj`, `Sänk`, vents, reservoir) refuse to send `31 01` until
+that check is green, so a wrong pair can no longer command another module.
+
+B20 also makes the log self-contained: every line has a millisecond timestamp, every UDS request
+has the current `TX→RX` pair, the service name, the decoded DID/RID, request and response hex,
+NRC name and elapsed milliseconds. Read passes log one line per channel with channel name, DID and
+value or error, and aggregate all failures instead of showing only the last one. **Kopiera allt** /
+**Dela** exports the whole retained log (up to 2500 lines) with a header containing the build,
+adapter, link mode, CAN pair and identity result.
 
 ### The crash on connect (B15, fixed in B16)
 
@@ -1029,10 +1096,11 @@ This is a diagnostic tool, not a toy. A wrong RID can command a valve or a compr
   session manager on top.
 - **No background operation.** iOS suspends BLE when the app leaves the foreground unless you add
   the bluetooth-central background mode, which this doesn't declare.
-- **B19 not yet confirmed on the car.** BLE, `10 03`, `3E 00` and DID reads answered on the A6 at
-  B16; B19 corrects the CAN pair and the `7F xx 78` handling that made the B18 level commands time
-  out. The whole-car level routines still await their first successful live run. Treat the first
-  `Höj` / `Sänk` as a test.
+- **B20 not yet confirmed on the car.** B16 proved BLE, `10 03`, `3E 00` and DID reads on the A6,
+  but on the wrong pair (`714/77E`, the cluster); B19 waited out `7F xx 78` correctly but still used
+  that pair. B20 moves module 34 to `755/7BF` and refuses to call the ECU open until a
+  module-34-specific DID answers. The whole-car level routines still await their first successful
+  live run. Treat the first `Höj` / `Sänk` as a test.
 
 ---
 

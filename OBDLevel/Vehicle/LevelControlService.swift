@@ -244,8 +244,8 @@ struct LevelProfile: Codable {
         return LevelProfile(
             name: "Min bil",
             vehicle: "Luftfjädring · UDS",
-            txId: 0x714,
-            rxId: 0x77E,
+            txId: 0x755,
+            rxId: 0x7BF,
             channels: channels,
             actions: actions,
             battery: battery.id
@@ -308,6 +308,10 @@ final class LevelControlService: ObservableObject {
     @Published var levelControlEnabled = true
     /// True once module 34 has actually answered a request, not just when BLE is up.
     @Published private(set) var ecuOpen = false
+    /// Which module-34-specific DIDs answered, e.g. "258F · 2B83 · 2B92".
+    @Published private(set) var identityProof = ""
+    /// Full identity probe result, shown in Diagnostik and copied with the log.
+    @Published private(set) var identityLine = ""
     /// Last routine started, so "Stoppa" knows what to abort.
     @Published private(set) var lastAction: RoutineAction?
     /// True only while a routine is actually being started/polled.
@@ -346,11 +350,17 @@ final class LevelControlService: ObservableObject {
     /// Older profiles stored channels without units, routines without roles and had no
     /// battery channel. Roles used to be implied by the routine name, so bake that in once.
     private static func migrate(_ profile: inout LevelProfile) {
-        // B19: the old CAN probe could save the engine pair 710/77A. This app only
-        // talks to module 34, which uses 714/77E; put such profiles back.
-        if profile.txId == 0x710 && profile.rxId == 0x77A {
-            profile.txId = 0x714
-            profile.rxId = 0x77E
+        // B20: module 34 is 755/7BF. Older probes could save the gateway 710/77A
+        // (B18/B19) or the instrument cluster 714/77E (B19), and both answer
+        // `10 03`/`22 F187` while rejecting every air-suspension DID with NRC 31.
+        // Move only those known-wrong pairs; a custom pair the user typed is kept.
+        let legacy: [(UInt32, UInt32)] = [
+            (0x710, 0x77A), (0x77A, 0x710),
+            (0x714, 0x77E), (0x77E, 0x714)
+        ]
+        if legacy.contains(where: { $0.0 == profile.txId && $0.1 == profile.rxId }) {
+            profile.txId = 0x755
+            profile.rxId = 0x7BF
             profile.idWidth = 4
         }
 
@@ -431,14 +441,24 @@ final class LevelControlService: ObservableObject {
             return
         }
         ecuOpen = false
+        identityProof = ""
+        identityLine = ""
         let width = profile.idWidth ?? 4
         let ok = await run("kopplar upp") {
             self.ecu.txId = self.profile.txId
             self.ecu.rxId = self.profile.rxId
             let report = try await self.ecu.open(idWidth: width)
-            self.ecuOpen = report.answered
-            self.statusLine = (report.answered ? "Styrenhet öppen · " : "Modul 34 svarar inte · ")
-                + report.summary
+            self.transport.note("open: " + report.summary)
+            let identity = await self.ecu.identifyModule34()
+            self.ecuOpen = identity.ok
+            self.identityProof = identity.proof
+            self.identityLine = identity.summary
+            if identity.ok {
+                self.statusLine = "Modul 34 öppen · " + identity.proof
+            } else {
+                self.statusLine = String(format: "Fel ECU? Ingen modul-34-DID svarar på %03X→%03X",
+                                         self.profile.txId, self.profile.rxId)
+            }
         }
         guard ok, ecuOpen else { return }
         if autoSettings.onConnect {
@@ -456,6 +476,8 @@ final class LevelControlService: ObservableObject {
     /// Called when the BLE link drops, so the header stops claiming the car answers.
     func handleDisconnect() {
         ecuOpen = false
+        identityProof = ""
+        identityLine = ""
         statusLine = "Adaptern frånkopplad"
     }
 
@@ -513,9 +535,11 @@ final class LevelControlService: ObservableObject {
                 lines.append("10 03 → " + ECUConnection.short(error))
             }
 
-            let ident = await self.ecu.identification()
-            self.ecuOpen = ident.ok
-            lines.append("22 F1 87 → " + ident.detail)
+            let identity = await self.ecu.identifyModule34()
+            self.ecuOpen = identity.ok
+            self.identityProof = identity.proof
+            self.identityLine = identity.summary
+            lines.append(identity.summary)
 
             do {
                 let alive = try await self.ecu.send([0x3E, 0x00])
@@ -523,7 +547,7 @@ final class LevelControlService: ObservableObject {
             } catch {
                 lines.append("3E 00 → " + ECUConnection.short(error))
             }
-            if ident.ok, let first = self.profile.channels.first(where: { $0.did != 0 }) {
+            if identity.ok, let first = self.profile.channels.first(where: { $0.did != 0 }) {
                 do {
                     let data = try await self.ecu.readDID(first.did)
                     lines.append(String(format: "22 %04X → %@", first.did, data.hex))
@@ -537,25 +561,27 @@ final class LevelControlService: ObservableObject {
 
     // MARK: CAN id probe
 
-    /// Tries the CAN id pairs module 34 can use: request `714`, response `77E`, in
+    /// Tries the only pair module 34 can use: request `755`, response `7BF`, in
     /// both byte widths and both directions. It deliberately does not try other
-    /// control units. An earlier version did, saved the engine pair `710/77A`, and
-    /// left the adapter filtered on the *last* candidate — so every later request
-    /// timed out even though the app said "Styrenhet svarar". Read-only: `22 F1 87`.
+    /// control units. A candidate only wins when a module-34-specific DID
+    /// (`258F`, `2B83` or `2B92`) answers — `10 03`, `3E 00` and `22 F187` are
+    /// answered by the cluster and gateway as well, which is exactly how earlier
+    /// builds ended up "connected" to the wrong ECU. Read-only: no `31 01`.
     func probeCANIDs() async {
         guard transport.ready else {
             statusLine = "Anslut adaptern först"
             return
         }
         let candidates: [(tx: UInt32, rx: UInt32, width: Int, label: String)] = [
-            (0x714, 0x77E, 4, "Modul 34"),
-            (0x714, 0x77E, 2, "Modul 34, 2 byte"),
-            (0x77E, 0x714, 4, "Modul 34 omvänd"),
-            (0x77E, 0x714, 2, "Modul 34 omvänd, 2 byte")
+            (0x755, 0x7BF, 4, "Modul 34"),
+            (0x755, 0x7BF, 2, "Modul 34, 2 byte"),
+            (0x7BF, 0x755, 4, "Modul 34 omvänd"),
+            (0x7BF, 0x755, 2, "Modul 34 omvänd, 2 byte")
         ]
         await run("letar CAN-id") {
             var lines: [String] = []
             var winner: (tx: UInt32, rx: UInt32, width: Int)?
+            var winnerIdentity: ECUConnection.ModuleIdentity?
             for candidate in candidates {
                 let label = String(format: "%03X→%03X", candidate.tx, candidate.rx)
                 do {
@@ -564,14 +590,19 @@ final class LevelControlService: ObservableObject {
                                                     width: candidate.width)
                     self.ecu.txId = candidate.tx
                     self.ecu.rxId = candidate.rx
-                    _ = try? await self.ecu.send([0x10, 0x03], retries: 0)
-                    let ident = await self.ecu.identification()
-                    if ident.ok {
-                        lines.append("\(label) ✓ \(ident.detail)")
+                    // Open the extended session before probing DIDs. The answer is
+                    // deliberately not used as proof: the cluster and gateway open
+                    // `10 03` too. It only gives module 34 the session its live
+                    // values may expect.
+                    _ = try? await self.ecu.send([0x10, 0x03], retries: 0, timeout: 1.5)
+                    let identity = await self.ecu.identifyModule34(fast: true, timeout: 1.5)
+                    if identity.ok {
+                        lines.append("\(label) ✓ \(identity.proof)")
                         winner = (candidate.tx, candidate.rx, candidate.width)
+                        winnerIdentity = identity
                         break
                     } else {
-                        lines.append("\(label) ✗ \(ident.detail)")
+                        lines.append("\(label) ✗ ingen modul-34-DID")
                     }
                 } catch {
                     lines.append("\(label) ✗ " + ECUConnection.short(error))
@@ -583,13 +614,17 @@ final class LevelControlService: ObservableObject {
                 self.profile.idWidth = winner.width
                 self.ecu.txId = winner.tx
                 self.ecu.rxId = winner.rx
-                // Leave the adapter on the winning pair, not on the last candidate.
+                self.identityProof = winnerIdentity?.proof ?? ""
+                self.identityLine = winnerIdentity?.summary ?? ""
+                self.ecuOpen = true
+                // Leave the adapter on the winning pair and open the session.
                 let report = try? await self.ecu.open(idWidth: winner.width)
-                self.ecuOpen = report?.answered ?? false
                 self.statusLine = "Hittade: " + lines.joined(separator: " · ")
                     + (report.map { " · " + $0.summary } ?? "")
             } else {
                 self.ecuOpen = false
+                self.identityProof = ""
+                self.identityLine = ""
                 self.statusLine = "Inget svar alls: " + lines.joined(separator: " · ")
             }
         }
@@ -829,6 +864,10 @@ final class LevelControlService: ObservableObject {
             statusLine = "\(action.name): RID saknas"
             return
         }
+        guard ecuOpen else {
+            statusLine = "Modul 34 är inte verifierad – kör Testa anslutning först"
+            return
+        }
         guard profile.channels.prefix(4).allSatisfy({ $0.did != 0 }) else {
             statusLine = "Identifiering kräver fyra höjd-DID — kör Autokonfigurering först"
             return
@@ -915,6 +954,8 @@ final class LevelControlService: ObservableObject {
             let wanted = Set(channels.map(\.id))
             var out: [HeightReading] = []
             var summary: [String] = []
+            var failures: [String] = []
+            var detail: [String] = []
             for channel in self.profile.channels {
                 let previous = self.readings.first { $0.did == channel.did && $0.name == channel.name }
                 guard wanted.contains(channel.id) else {
@@ -935,19 +976,36 @@ final class LevelControlService: ObservableObject {
                                              did: channel.did,
                                              value: value,
                                              raw: data.hex))
-                    if let value { summary.append(String(format: "%.1f", value)) }
+                    if let value {
+                        summary.append(String(format: "%.1f", value))
+                        detail.append(String(format: "%@ %04X=%.1f%@",
+                                             channel.name, channel.did, value,
+                                             channel.unit ?? ""))
+                    } else {
+                        detail.append(String(format: "%@ %04X=rå %@",
+                                             channel.name, channel.did, data.hex))
+                    }
                 } catch {
+                    let reason = ECUConnection.short(error)
                     out.append(HeightReading(name: channel.name,
                                              did: channel.did,
                                              value: nil,
-                                             raw: "err " + ECUConnection.short(error)))
+                                             raw: "err " + reason))
+                    failures.append(String(format: "%@ %04X: %@",
+                                           channel.name, channel.did, reason))
+                    detail.append(String(format: "%@ %04X=✗ %@",
+                                         channel.name, channel.did, reason))
                 }
             }
             self.readings = out
             self.ecuOpen = self.ecuOpen || out.contains(where: { $0.value != nil })
-            if out.contains(where: { $0.did != 0 && $0.raw.hasPrefix("err") }) {
-                let first = out.first { $0.raw.hasPrefix("err") }
-                self.statusLine = "Fel vid läsning: " + (first?.raw ?? "")
+            if !detail.isEmpty {
+                self.transport.note("\(label): " + detail.joined(separator: " · "))
+            }
+            if !failures.isEmpty {
+                self.statusLine = "\(failures.count) fel: "
+                    + failures.prefix(4).joined(separator: " · ")
+                    + (failures.count > 4 ? " …" : "")
             } else {
                 self.statusLine = summary.isEmpty ? "Inga värden" : summary.joined(separator: " / ")
             }
@@ -1026,6 +1084,13 @@ final class LevelControlService: ObservableObject {
     func runAction(_ action: RoutineAction) async -> Bool {
         guard action.rid != 0 else {
             statusLine = "\(action.name): RID saknas i Inställningar"
+            return false
+        }
+        // A routine writes to the car. Never send `31 01` before a
+        // module-34-specific DID has proved that 755/7BF is the right ECU;
+        // "10 03 answered" is also true for the cluster and gateway.
+        guard ecuOpen else {
+            statusLine = "Modul 34 är inte verifierad – kör Testa anslutning eller Hitta CAN-id först"
             return false
         }
         lastAction = action

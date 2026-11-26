@@ -104,7 +104,10 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// 1 = classic SPP dongle, 2 = BLE, 3 = Pro 3 generation
     @Published private(set) var generation: UInt8?
     @Published var devices: [Discovered] = []
+    /// Small snapshot for SwiftUI. The full log can hold thousands of lines.
     @Published var log: [String] = []
+    /// How many lines the full log holds, so the UI does not have to render them all.
+    @Published private(set) var logTotal = 0
 
     private var central: CBCentralManager!
     private var known: [UUID: CBPeripheral] = [:]
@@ -162,6 +165,19 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     private var logLines: [String] = []
     private var flushPending = false
 
+    /// Last CAN pair applied to the adapter, used in every log line so a copied
+    /// log says which module the app was actually talking to.
+    private var canTx: UInt32?
+    private var canRx: UInt32?
+    private var canWidth = 4
+
+    var canPairText: String {
+        sync {
+            guard let tx = canTx, let rx = canRx else { return "—" }
+            return String(format: "%03X→%03X", tx, rx)
+        }
+    }
+
     /// Runs `body` holding the shared state. Recursive, because a frame that
     /// arrives while the parser is already running must not deadlock.
     @discardableResult
@@ -214,11 +230,32 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     }
 
     func note(_ line: String) {
+        let stamped = Self.timestamp() + " " + line
         sync {
-            logLines.append(line)
-            if logLines.count > 500 { logLines.removeFirst(logLines.count - 500) }
+            logLines.append(stamped)
+            if logLines.count > 2500 { logLines.removeFirst(logLines.count - 2500) }
         }
         scheduleLogFlush()
+    }
+
+    /// 14:03:12.481. Cheap enough to put on every line, including each BLE
+    /// notification, and essential when a log has to be read without the phone.
+    private static func timestamp() -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second, .nanosecond],
+                                                     from: Date())
+        return String(format: "%02d:%02d:%02d.%03d",
+                      parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0,
+                      (parts.nanosecond ?? 0) / 1_000_000)
+    }
+
+    /// Everything still retained, with a caller-supplied header. Copy uses this,
+    /// not the short `log` snapshot the view renders.
+    func exportLog(header: [String]) -> String {
+        let lines = sync { logLines }
+        var out = header
+        out.append("")
+        out.append(contentsOf: lines)
+        return out.joined(separator: "\n")
     }
 
     /// Publishing every received byte straight into `@Published log` re-rendered
@@ -234,12 +271,15 @@ final class OBDelevenTransport: NSObject, ObservableObject {
         guard schedule else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
-            let snapshot: [String] = self.sync {
+            let snapshot: (lines: [String], total: Int) = self.sync {
                 self.flushPending = false
-                return self.logLines
+                return (Array(self.logLines.suffix(400)), self.logLines.count)
             }
             // A snapshot captured a moment earlier must never replace a newer one.
-            if snapshot.count >= self.log.count { self.log = snapshot }
+            if snapshot.total >= self.logTotal {
+                self.log = snapshot.lines
+                self.logTotal = snapshot.total
+            }
         }
     }
 
@@ -330,6 +370,12 @@ final class OBDelevenTransport: NSObject, ObservableObject {
     /// 31 (`id | 0x80000000`) before it is written, the same way
     /// `ConnectToUdsExtendedUC` does.
     func setCAN(tx: UInt32, rx: UInt32, width: Int = 4, extended: Bool = false) async throws {
+        sync {
+            self.canTx = tx
+            self.canRx = rx
+            self.canWidth = width
+        }
+        note(String(format: "CAN-id tx=%03X rx=%03X (%d byte)", tx, rx, width))
         _ = try await exchange([0x22, 0x00] + Self.idBytes(rx, width: width, extended: extended), kind: .ioCtl)
         _ = try await exchange([0x22, 0x01] + Self.idBytes(tx, width: width, extended: extended), kind: .ioCtl)
     }
@@ -387,7 +433,8 @@ final class OBDelevenTransport: NSObject, ObservableObject {
                 sawResponse = true
                 while kind == .command, response.count >= 3,
                       response[0] == 0x7F, response[2] == 0x78 {
-                    note("< " + response.hex + " (väntar på slutsvar)")
+                    note("\(canPairText)  " + response.hex
+                         + "  responsePending, väntar på slutsvar")
                     let remaining = deadline.timeIntervalSinceNow
                     guard remaining > 0 else { throw OBDError.timeout }
                     response = try await waitResponse(kind: kind, timeout: remaining)
