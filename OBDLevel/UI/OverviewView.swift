@@ -5,7 +5,7 @@ struct OverviewView: View {
     @EnvironmentObject var service: LevelControlService
     @EnvironmentObject var demo: DemoModel
 
-    @State private var autoRefresh = false
+    @State private var autoRefresh = true
     @State private var pendingVent: VentTarget?
     @State private var showMore = false
 
@@ -42,20 +42,25 @@ struct OverviewView: View {
         }
     }
 
-    // MARK: Raise / lower - the one thing this app is for
+    // MARK: Slam / normal - the one thing this app is for
 
     private var rideSection: some View {
         VStack(spacing: 10) {
-            SectionHeading(title: "Höj & sänk",
+            SectionHeading(title: "Snabbkontroll",
                            trailing: demo.enabled ? "Simulering" : (liveReady ? "Live" : "Offline"))
 
             Card {
-                HStack(spacing: 8) {
-                    ActionButton(title: "Höj", enabled: bothEnabled(up: true)) {
-                        moveBoth(up: true)
+                HStack(spacing: 10) {
+                    BigActionButton(title: "Slam",
+                                    subtitle: "Nivå av\nvent fram + bak",
+                                    destructive: true,
+                                    enabled: slamEnabled) {
+                        slam()
                     }
-                    ActionButton(title: "Sänk", enabled: bothEnabled(up: false)) {
-                        moveBoth(up: false)
+                    BigActionButton(title: "Normal",
+                                    subtitle: "Nivå på\nnormalhöjd",
+                                    enabled: normalEnabled) {
+                        normal()
                     }
                 }
                 .padding(11)
@@ -71,22 +76,17 @@ struct OverviewView: View {
                 }
 
                 HairLine()
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("Båda axlarna")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.ink)
-                    Text(rideStatus)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.muted)
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                Text(rideStatus)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
             }
 
             if !demo.enabled {
-                Text("Höj går till högläge, Sänk tillbaka till normalnivå.")
+                Text("Slam stänger av nivåregleringen och ventilerar fram och bak i tur. Normal slår på nivåregleringen igen så bilen höjer sig till normalhöjd.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,21 +102,33 @@ struct OverviewView: View {
         transport.ready && service.ecuOpen
     }
 
-    private func bothEnabled(up: Bool) -> Bool {
-        if demo.enabled { return demo.activeVent == nil && demo.activeReservoir == nil }
+    private var slamEnabled: Bool {
+        if demo.enabled { return true }
         guard liveReady, !service.busy else { return false }
-        let role: ActionRole = up ? .raiseHigh : .lowerNormal
-        if service.hasRoutine(role) { return true }
-        let roles: [ActionRole] = up ? [.raiseFront, .raiseRear] : [.lowerFront, .lowerRear]
-        return roles.allSatisfy { service.hasRoutine($0) }
+        return service.hasRoutine(.levelOff)
+            && service.hasRoutine(.ventFront)
+            && service.hasRoutine(.ventRear)
     }
 
-    private func moveBoth(up: Bool) {
+    private var normalEnabled: Bool {
+        if demo.enabled { return true }
+        guard liveReady, !service.busy else { return false }
+        return service.hasRoutine(.levelOn)
+    }
+
+    private func slam() {
         if demo.enabled {
-            demo.lift(.front, up: up)
-            demo.lift(.rear, up: up)
+            demo.slam()
         } else {
-            Task { await service.moveBoth(up: up) }
+            Task { await service.slam() }
+        }
+    }
+
+    private func normal() {
+        if demo.enabled {
+            demo.normalLevel()
+        } else {
+            Task { await service.normalLevel() }
         }
     }
 

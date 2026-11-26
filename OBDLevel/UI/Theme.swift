@@ -17,6 +17,9 @@ enum Palette {
     static let buttonInk = Color(rgb: 0xE1EDFF)
     static let switchOn = Color(rgb: 0x3265A8)
     static let green = Color(rgb: 0x6FDD9B)
+    static let danger = Color(rgb: 0x3A1F27)
+    static let dangerLine = Color(rgb: 0x8E4A58)
+    static let dangerInk = Color(rgb: 0xFFD9DE)
 }
 
 extension Color {
@@ -195,6 +198,49 @@ struct ActionButton: View {
                         .stroke(running ? Palette.blue : (enabled ? Palette.buttonLine : Palette.line),
                                 lineWidth: 1)
                 )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+/// Two big primary controls on the overview. Slam is deliberately red-toned;
+/// Normal uses the ordinary blue button palette.
+struct BigActionButton: View {
+    let title: String
+    let subtitle: String
+    var destructive: Bool = false
+    var running: Bool = false
+    var enabled: Bool = true
+    let action: () -> Void
+
+    private var fill: Color { destructive ? Palette.danger : Palette.button }
+    private var border: Color { destructive ? Palette.dangerLine : Palette.buttonLine }
+    private var ink: Color { destructive ? Palette.dangerInk : Palette.buttonInk }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.system(size: 20, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+                    .multilineTextAlignment(.center)
+                    .opacity(0.8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 66)
+            .foregroundStyle(enabled ? ink : Palette.muted)
+            .background(enabled ? fill : Palette.surfaceAlt)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(running ? Palette.blue : (enabled ? border : Palette.line),
+                            lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
         .disabled(!enabled)

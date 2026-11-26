@@ -50,7 +50,9 @@ with jadx. Nothing here is guessed.
 | Battery voltage channel | works — DID found by the automatic search |
 | Automatic DID discovery (`22` probing + scaling guesses) | works, ranges configurable |
 | Automatic RID discovery (`31 03` only, never starts anything) | works |
-| Quick raise / lower buttons | works — whole-car basic settings, `31 01 03DD` / `31 01 03E0` |
+| One-tap **Slam** | implemented — `03D4` level off, then `03CB` front vent and `03CC` rear vent |
+| One-tap **Normal** | implemented — `03C8` level on first, then `03D6`/`03E0` if the car has not moved |
+| Live wheel heights | `2B8E`–`2B91`, 1 byte × 2.1 mm, refreshed every 2 s |
 | Identify a routine by measuring (`Mät & mappa`) | works — runs 8 s, measures the corners, assigns the role |
 | Security access (`27 01`/`27 02`) | implemented, key algorithm must be supplied |
 | K-line / KWP2000 transport selection | selectable (`20 05`), KWP framing not implemented |
@@ -561,26 +563,28 @@ The measuring values that unit lists give these DIDs that do not change between 
 
 | Value | DID | Bytes | Scale | Unit |
 |---|---|---|---|---|
-| Body height left front wheel house edge | `258F` | 2 | 0.1 | mm |
-| Body height right front wheel house edge | `2590` | 2 | 0.1 | mm |
-| Body height left rear wheel house edge | `2591` | 2 | 0.1 | mm |
-| Body height right rear wheel house edge | `2592` | 2 | 0.1 | mm |
+| Live height left front (`DOP_UFLOA1Byte21xMilliMeter`) | `2B8E` | 1 | 2.1 | mm |
+| Live height right front | `2B8F` | 1 | 2.1 | mm |
+| Live height left rear | `2B90` | 1 | 2.1 | mm |
+| Live height right rear | `2B91` | 1 | 2.1 | mm |
 | System pressure (`actual_signal_pressure_sensor`) | `2B83` | 1 | 0.1 | bar |
 | Compressor temperature | `2B84` | 1 | 0.5 | °C |
 | Calculated compressor temperature | `2B96` | 1 | 0.5 | °C |
 | System status | `2B92` | 1 | 1 | enum |
 
 `LevelProfile.blank` ships with the wheels, battery and the three air-system values visible, so a
-fresh install reads heights, pressure and compressor temperature without a scan. **B21 corrects
-the old guesses**: `2B83` is one byte × 0.1 bar, and `2B84`/`2B96` are one byte × 0.5 °C. The
-previous two-byte/0.01 definitions explained why the log showed `2B83=rå 00` and 51 °C instead of
-5 °C. Existing profiles are corrected on launch; *Inställningar → Autokonfigurering → Kända DID*
-re-applies the table.
+fresh install reads heights, pressure and compressor temperature without a scan. **B22 moves the
+height cards to live data**: `258F`–`2592` are body-height wheel-house *reference* values and stay
+at 414/414/412/412 mm even while the car moves, so they must not drive the cards. The first four
+channels of an existing profile are migrated to `2B8E`–`2B91` once (`heightSchema = 22`), the old
+rows are dropped and duplicates removed. B21 corrected the previous scaling guesses (`2B83` is one
+byte × 0.1 bar, `2B84`/`2B96` one byte × 0.5 °C); B22 keeps that metadata. *Inställningar →
+Autokonfigurering → Kända DID* re-applies the table.
 
-Every other value the module lists (absolute heights, deviations, bellows pressures, drive
-select, door status, …) is still in the profile but **hidden by default**. B21 neither reads nor
-shows it. *System → Dolda värden* lists them with a **Visa** button, and the eye icon on each extra
-row in *Inställningar → Höjdkanaler* toggles it back. Hidden values are kept across restarts.
+Every other value the module lists (deviations, bellows pressures, drive select, door status, …)
+is still in the profile but **hidden by default**. B22 neither reads nor shows it. *System → Dolda
+värden* lists them with a **Visa** button, and the eye icon on each extra row in *Inställningar →
+Höjdkanaler* toggles it back. Hidden values are kept across restarts.
 
 ### Basic settings in module 34
 
@@ -592,6 +596,7 @@ without scanning:
 |---|---|
 | Höj till högläge (`Go_to_high_level_and_deactivate_self-levelling`) | `03DD` |
 | Sänk till normalnivå (`Go_to_normal_level_and_deactivate_self-levelling_permanent`) | `03E0` |
+| Normalhöjd/referens (`Go_to_reference_level`) | `03D6` |
 | Höj fram (`…front_axle_charging`) | `03CE` |
 | Sänk fram (`…front_axle_bleeding`) | `03CB` |
 | Höj bak (`…rear_axle_charging`) | `03CF` |
@@ -602,8 +607,16 @@ without scanning:
 | Lufta behållare (`Accumulator_bleeding`) | `03CA` |
 
 Every one uses the option record `04 00 00`. *Vent fram* / *Vent bak* are the same bleeding
-routines as *Sänk fram* / *Sänk bak*. The module ODX contains no `SECURITY-REF`, so basic settings
-need no security access. A `31 03` scan is still useful for routines outside this table.
+routines as *Sänk fram* / *Sänk bak*. The module ODX contains no `SECURITY-REF`, yet a real C7 can
+answer `7F 31 33` (`securityAccessDenied`) on `03E0` and `03D6`; those two are calibration-adjacent
+and commonly need security access `20103`. B22 therefore uses the known-working `03C8` first for
+*Normal* and treats a denied `03D6`/`03E0` as a logged fallback, not a fatal error. A `31 03` scan is
+still useful for routines outside this table.
+
+**One-tap Slam** sequences `03D4` (level off) → `03CB` (front bleed) → `03CC` (rear bleed), because
+only one basic setting may run at a time. **Stoppa** aborts the whole sequence. **Normal** first
+sends `03C8` (level on) and waits up to 6 s for the car to rise; if it has not moved, it tries
+`03D6`, then `03E0`, then `03C8` again.
 
 **The session is the other half of the problem.** `DiagnServi_RoutiContrStartBasicSetti` is linked
 to the development, extended and end-of-line sessions — *not* the default session. The ECU leaves
@@ -670,6 +683,10 @@ and **Diagnostik**.
 | `1232` | Nivåtryck HF | `2B93` | Nivåregulator villkor |
 | `1234` | Nivåtryck VB | `2B94` | Börvärde nivå |
 | `1236` | Nivåtryck HB | `2B98`–`2B9B` | Börvärdeavvikelse per hjul |
+
+**Only `2B8E`–`2B91` are live height values.** `258F`–`2592` are the wheel-house reference
+(414/414/412/412 mm) and stay put when the car moves, so B22 uses them only as an identity check,
+never for the cards.
 
 Also present, unassigned by default: `220D` doors/lids, `282A` Audi drive select, `1309` car-jack
 mode, `1301`–`1308` valve/compressor counters, `0x1210` calibrated level values, `2B85`–`2B88`
@@ -813,10 +830,16 @@ either talks to the adapter or, in demo mode, to a local simulation.
 **Översikt**
 - Four wheel heights in a 2×2 grid. `Läs nu` reads the wheels and battery; `Auto 2 s` repeats it.
   Hidden extras are never part of this loop.
-- **Höj & sänk** — the quick controls. `Höj` runs `31 01 03DD 04 00 00` (whole car to high level),
-  `Sänk` runs `31 01 03E0 04 00 00` (normal level) and then `31 01 03C8 04 00 00` to switch
-  self-levelling back on. One tap, both axles. The same card gets a `Stoppa` button while anything
-  is running, which sends `31 02` on the next poll instead of waiting out the routine.
+- **Slam / Normal** — the two primary controls, one tap each.
+  - **Slam** turns self-levelling off (`31 01 03D4 04 00 00`), then bleeds the front axle
+    (`03CB`) and finally the rear axle (`03CC`). Only one basic setting may run at a time, so the
+    steps are sequential. `Stoppa` aborts the whole sequence.
+  - **Normal** first sends `31 01 03C8 04 00 00` (self-levelling on), waits up to 6 s for the car to
+    rise, and only if nothing moves tries the reference level (`03D6`) and then `03E0`; both are
+    calibration-adjacent and commonly need security access `20103`, so a denied fallback is logged
+    and is not fatal. `03C8` is sent again in that case to leave level control on.
+  - The same card gets a `Stoppa` button while anything is running, which sends `31 02` instead of
+    waiting out the routine.
 - Both buttons, the per-axle buttons, venting and the level-control switch are disabled unless the
   adapter is connected **and** module 34 has passed the identity check. The heading says `Offline`
   instead of `Live` when they cannot work.
@@ -878,27 +901,28 @@ level control and the value display.
 ### Role mapping
 
 Routine ids are not guesses — but their names are per-car. Instead of hardcoding "vent front is
-RID 0x1234", the app maps twelve roles to whatever routines your profile contains:
+RID 0x1234", the app maps thirteen roles to whatever routines your profile contains:
 
-| Role | Button |
+| Role | Button / sequence |
 |---|---|
-| `raiseHigh` | Höj (both axles) |
-| `lowerNormal` | Sänk (both axles) |
+| `raiseHigh` | Höj (both axles), folded per-axle controls |
+| `lowerNormal` | Sänk (both axles), Normal fallback |
+| `referenceLevel` | Normal fallback (`03D6`) |
 | `raiseFront` | Höj fram |
 | `lowerFront` | Sänk fram |
 | `raiseRear` | Höj bak |
 | `lowerRear` | Sänk bak |
-| `ventFront` | Vent fram |
-| `ventRear` | Vent bak |
-| `levelOff` | Nivåreglering av |
-| `levelOn` | Nivåreglering på |
+| `ventFront` | Vent fram, Slam step 2 |
+| `ventRear` | Vent bak, Slam step 3 |
+| `levelOff` | Nivåreglering av, Slam step 1 |
+| `levelOn` | Nivåreglering på, Normal step 1 |
 | `reservoirFill` | Fyll behållare |
 | `reservoirVent` | Lufta behållare |
 
 Unmapped buttons are disabled — no accidental `31 01` with RID 0. Profiles created before roles
 existed are migrated once, by name, on first launch. Profiles from B17 and earlier keep their rows
-but get the confirmed RIDs, the `04 00 00` option record and the two whole-car level routines
-filled in on launch (B18).
+but get the confirmed RIDs, the `04 00 00` option record and the whole-car level routines filled in
+on launch (B18+).
 
 ---
 

@@ -18,6 +18,16 @@ enum WheelSlot: Int, CaseIterable, Codable, Hashable {
         }
     }
 
+    /// Short form used in one-line status and log summaries.
+    var shortTitle: String {
+        switch self {
+        case .frontLeft: return "VF"
+        case .frontRight: return "HF"
+        case .rearLeft: return "VB"
+        case .rearRight: return "HB"
+        }
+    }
+
     var axle: Axle {
         (self == .frontLeft || self == .frontRight) ? .front : .rear
     }
@@ -66,6 +76,7 @@ enum VentTarget: String, CaseIterable, Hashable {
 enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
     case raiseHigh
     case lowerNormal
+    case referenceLevel
     case raiseFront
     case lowerFront
     case raiseRear
@@ -83,6 +94,7 @@ enum ActionRole: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .raiseHigh: return "Höj till högläge"
         case .lowerNormal: return "Sänk till normalnivå"
+        case .referenceLevel: return "Normalhöjd (referens)"
         case .raiseFront: return "Höj fram"
         case .lowerFront: return "Sänk fram"
         case .raiseRear: return "Höj bak"
@@ -171,14 +183,25 @@ struct LevelProfile: Codable {
     var battery: UUID?
     /// Bytes per CAN id in the adapter's 0x22 ioctl. Nil means the usual four.
     var idWidth: Int?
+    /// Bumped when the four wheel channels move to a new DID scheme. Nil means
+    /// a pre-B22 profile that still points at the static wheel-house values.
+    var heightSchema: Int?
+
+    /// The four live absolute height values from EV_AirSuspe_003024:
+    /// `DOP_UFLOA1Byte21xMilliMeter`, one byte × 2.1 mm. The older `258F`–`2592`
+    /// values are body-height wheel-house reference values and stay at
+    /// 414/414/412/412 mm even while the car is moving, so they must never drive
+    /// the height cards again.
+    static let wheelDIDs: [UInt16] = [0x2B8E, 0x2B8F, 0x2B90, 0x2B91]
+    static let legacyWheelDIDs: [UInt16] = [0x258F, 0x2590, 0x2591, 0x2592]
 
     /// Live data as the module lists it. Heights first on purpose: the overview reads
     /// the first four channels and calls them the wheels.
     static let knownDIDs: [KnownDID] = [
-        KnownDID(name: "Vänster fram", did: 0x258F, length: 2, scale: 0.1, unit: "mm", essential: true),
-        KnownDID(name: "Höger fram", did: 0x2590, length: 2, scale: 0.1, unit: "mm", essential: true),
-        KnownDID(name: "Vänster bak", did: 0x2591, length: 2, scale: 0.1, unit: "mm", essential: true),
-        KnownDID(name: "Höger bak", did: 0x2592, length: 2, scale: 0.1, unit: "mm", essential: true),
+        KnownDID(name: "Vänster fram", did: 0x2B8E, length: 1, scale: 2.1, unit: "mm", essential: true),
+        KnownDID(name: "Höger fram", did: 0x2B8F, length: 1, scale: 2.1, unit: "mm", essential: true),
+        KnownDID(name: "Vänster bak", did: 0x2B90, length: 1, scale: 2.1, unit: "mm", essential: true),
+        KnownDID(name: "Höger bak", did: 0x2B91, length: 1, scale: 2.1, unit: "mm", essential: true),
 
         // Lengths and scales from EV_AirSuspe_003024: 2B83 is one byte × 0.1 bar,
         // 2B84/2B96 are one byte × 0.5 °C, 2B92 is one status byte. The old
@@ -187,11 +210,6 @@ struct LevelProfile: Codable {
         KnownDID(name: "Kompressortemperatur", did: 0x2B84, length: 1, scale: 0.5, unit: "°C", essential: true),
         KnownDID(name: "Beräknad kompressortemp", did: 0x2B96, length: 1, scale: 0.5, unit: "°C"),
         KnownDID(name: "Kompressor omgivningstemp", did: 0x2B97, length: 2, scale: 0.1, unit: "°C"),
-
-        KnownDID(name: "Absolut höjd VF", did: 0x2B8E, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Absolut höjd HF", did: 0x2B8F, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Absolut höjd VB", did: 0x2B90, length: 2, scale: 0.1, unit: "mm"),
-        KnownDID(name: "Absolut höjd HB", did: 0x2B91, length: 2, scale: 0.1, unit: "mm"),
 
         KnownDID(name: "Avvikelse VF", did: 0x2B8A, length: 2, scale: 0.1, unit: "mm", signed: true),
         KnownDID(name: "Avvikelse HF", did: 0x2B8B, length: 2, scale: 0.1, unit: "mm", signed: true),
@@ -223,11 +241,15 @@ struct LevelProfile: Codable {
     static let optionRecord: [UInt8] = [0x04, 0x00, 0x00]
 
     /// RID:s from `TAB_RoutiContrBasicSetti` in EV_AirSuspe_003024.odx, not guessed:
-    /// `0x03DD` goes to high level, `0x03E0` to normal level, and the rest charge or
-    /// bleed one axle. The two level routines already move both axles.
+    /// `0x03DD` goes to high level, `0x03D6` goes to the reference level,
+    /// `0x03E0` to normal level, and the rest charge or bleed one axle. The two
+    /// level routines already move both axles. `03D6`/`03E0` are calibration-
+    /// adjacent and commonly answer NRC 0x33 securityAccessDenied on a C7, so
+    /// the quick Normal button uses the known-working `03C8` activation first.
     static let knownActions: [(role: ActionRole, name: String, rid: UInt16)] = [
         (.raiseHigh, "Höj till högläge", 0x03DD),
         (.lowerNormal, "Sänk till normalnivå", 0x03E0),
+        (.referenceLevel, "Normalhöjd (referens)", 0x03D6),
         (.raiseFront, "Höj fram", 0x03CE),
         (.lowerFront, "Sänk fram", 0x03CB),
         (.raiseRear, "Höj bak", 0x03CF),
@@ -260,7 +282,8 @@ struct LevelProfile: Codable {
             rxId: 0x7BF,
             channels: channels,
             actions: actions,
-            battery: battery.id
+            battery: battery.id,
+            heightSchema: 22
         )
     }
 }
@@ -395,6 +418,11 @@ final class LevelControlService: ObservableObject {
             }
         }
 
+        if (profile.heightSchema ?? 0) < 22 {
+            migrateHeights(&profile)
+            profile.heightSchema = 22
+        }
+
         applyKnownActions(&profile)
         applyKnownMetadata(&profile)
         applyKnownVisibility(&profile)
@@ -411,6 +439,57 @@ final class LevelControlService: ObservableObject {
                                     scale: 0.001, offset: 0, signed: false, unit: "V")
         profile.channels.append(channel)
         profile.battery = channel.id
+    }
+
+    /// B22: the four wheel slots used to be `258F`–`2592`, which the module
+    /// answers with the static wheel-house reference (414/414/412/412 mm) no
+    /// matter where the car is. Move those slots to the live absolute heights
+    /// `2B8E`–`2B91` (one byte × 2.1 mm), force the correct metadata, and drop
+    /// the old rows so they cannot come back as visible extras.
+    private static func migrateHeights(_ profile: inout LevelProfile) {
+        let live = LevelProfile.wheelDIDs
+        let legacy = LevelProfile.legacyWheelDIDs
+
+        for slot in 0..<4 {
+            if profile.channels.count <= slot {
+                let known = LevelProfile.knownDIDs[slot]
+                profile.channels.append(
+                    HeightChannel(name: known.name, did: known.did,
+                                  length: known.length, scale: known.scale,
+                                  offset: 0, signed: known.signed, unit: known.unit)
+                )
+                continue
+            }
+
+            // B22 has exactly one definition of the four height cards. Force the
+            // live DID and its metadata even if an older auto-scan put something
+            // else in a slot; a car-specific extra can still be added as a fifth
+            // channel and shown from System.
+            profile.channels[slot].did = live[slot]
+            let known = LevelProfile.knownDIDs[slot]
+            profile.channels[slot].name = known.name
+            profile.channels[slot].length = known.length
+            profile.channels[slot].scale = known.scale
+            profile.channels[slot].offset = 0
+            profile.channels[slot].signed = known.signed
+            profile.channels[slot].unit = known.unit
+            // The overview always needs its four wheels; never migrate them hidden.
+            profile.channels[slot].hidden = nil
+        }
+
+        var seen = Set(profile.channels.prefix(4).map(\.did))
+        var kept: [HeightChannel] = []
+        for (index, channel) in profile.channels.enumerated() {
+            if index >= 4 {
+                // The old wheel-house values are not live data and the live
+                // heights are already the four wheel cards.
+                if legacy.contains(channel.did) { continue }
+                if live.contains(channel.did) && seen.contains(channel.did) { continue }
+            }
+            kept.append(channel)
+            if index < 4 { seen.insert(channel.did) }
+        }
+        profile.channels = kept
     }
 
     /// B20 and older stored guessed lengths/scales for some live values. B21
@@ -459,7 +538,7 @@ final class LevelControlService: ObservableObject {
                 profile.actions[i].parameters = LevelProfile.optionRecord
             }
         }
-        for known in LevelProfile.knownActions where known.role == .raiseHigh || known.role == .lowerNormal {
+        for known in LevelProfile.knownActions {
             guard !profile.actions.contains(where: { $0.role == known.role }) else { continue }
             profile.actions.append(RoutineAction(name: known.name, rid: known.rid,
                                                  parameters: LevelProfile.optionRecord, role: known.role))
@@ -717,8 +796,25 @@ final class LevelControlService: ObservableObject {
         }
 
         // Keep anything the user added that is not in the known list, battery included.
+        // The old static wheel-house rows and duplicate live heights are not kept:
+        // the first four wheel cards already are the live values.
         for channel in updated.channels where !used.contains(channel.id) {
+            if LevelProfile.legacyWheelDIDs.contains(channel.did) { continue }
+            if LevelProfile.wheelDIDs.contains(channel.did) { continue }
             built.append(channel)
+        }
+
+        // The first four slots are always the wheels. Make sure a channel that
+        // matched 2B8E–2B91 is not left hidden and carries the live metadata.
+        for slot in 0..<min(4, built.count) {
+            let known = LevelProfile.knownDIDs[slot]
+            built[slot].name = known.name
+            built[slot].length = known.length
+            built[slot].scale = known.scale
+            built[slot].offset = 0
+            built[slot].signed = known.signed
+            built[slot].unit = known.unit
+            built[slot].hidden = nil
         }
 
         if let id = updated.battery, built.contains(where: { $0.id == id }) {
@@ -990,6 +1086,14 @@ final class LevelControlService: ObservableObject {
 
     // MARK: Heights
 
+    /// Result of one read pass. Kept separate from `run` so a Slam/Normal
+    /// sequence can read the live heights inside its own busy block.
+    private struct FetchResult {
+        var summary: [String] = []
+        var failures: [String] = []
+        var detail: [String] = []
+    }
+
     /// The four wheels plus the battery: everything the overview and the battery card
     /// need on a 2 s refresh. Reading all 30 known ids every tick would take seconds.
     var fastChannels: [HeightChannel] {
@@ -998,6 +1102,16 @@ final class LevelControlService: ObservableObject {
             list.append(battery)
         }
         return list
+    }
+
+    /// Short one-line height summary for status and log, e.g. "VF 380 · HF 367".
+    var heightSummary: String {
+        let parts = WheelSlot.allCases.compactMap { slot -> String? in
+            guard slot.rawValue < readings.count,
+                  let value = readings[slot.rawValue].value else { return nil }
+            return String(format: "%@ %.0f", slot.shortTitle, value)
+        }
+        return parts.isEmpty ? "höjder ej avlästa" : parts.joined(separator: " · ")
     }
 
     func readHeights() async {
@@ -1015,67 +1129,77 @@ final class LevelControlService: ObservableObject {
         await read(profile.channels, label: "läser alla kanaler")
     }
 
+    /// Reads the selected channels and publishes the readings. Does not take the
+    /// `busy` lock, so the caller decides whether it belongs to a sequence.
+    private func fetch(_ channels: [HeightChannel]) async -> FetchResult {
+        let wanted = Set(channels.map(\.id))
+        var out: [HeightReading] = []
+        var result = FetchResult()
+        for channel in self.profile.channels {
+            let previous = self.readings.first { $0.did == channel.did && $0.name == channel.name }
+            guard wanted.contains(channel.id) else {
+                out.append(previous ?? HeightReading(name: channel.name,
+                                                     did: channel.did,
+                                                     value: nil,
+                                                     raw: channel.did == 0 ? "no DID" : "–"))
+                continue
+            }
+            guard channel.did != 0 else {
+                out.append(HeightReading(name: channel.name, did: 0, value: nil, raw: "no DID"))
+                continue
+            }
+            do {
+                let data = try await self.ecu.readDID(channel.did, timeout: 2)
+                let value = channel.decode(data)
+                out.append(HeightReading(name: channel.name,
+                                         did: channel.did,
+                                         value: value,
+                                         raw: data.hex))
+                if let value {
+                    result.summary.append(String(format: "%.1f", value))
+                    result.detail.append(String(format: "%@ %04X=%.1f%@",
+                                                channel.name, channel.did, value,
+                                                channel.unit ?? ""))
+                } else {
+                    result.detail.append(String(format: "%@ %04X=rå %@",
+                                                channel.name, channel.did, data.hex))
+                }
+            } catch {
+                let reason = ECUConnection.short(error)
+                out.append(HeightReading(name: channel.name,
+                                         did: channel.did,
+                                         value: nil,
+                                         raw: "err " + reason))
+                result.failures.append(String(format: "%@ %04X: %@",
+                                              channel.name, channel.did, reason))
+                result.detail.append(String(format: "%@ %04X=✗ %@",
+                                             channel.name, channel.did, reason))
+            }
+        }
+        self.readings = out
+        return result
+    }
+
+    /// Writes the read pass to the log and the status line. Never promotes
+    /// `ecuOpen`: only a module-34-specific identity DID may unlock routines.
+    private func report(_ result: FetchResult, label: String) {
+        if !result.detail.isEmpty {
+            transport.note("\(label): " + result.detail.joined(separator: " · "))
+        }
+        if !result.failures.isEmpty {
+            statusLine = "\(result.failures.count) fel: "
+                + result.failures.prefix(4).joined(separator: " · ")
+                + (result.failures.count > 4 ? " …" : "")
+        } else {
+            statusLine = result.summary.isEmpty ? "Inga värden"
+                : result.summary.joined(separator: " / ")
+        }
+    }
+
     private func read(_ channels: [HeightChannel], label: String) async {
         await run(label) {
-            let wanted = Set(channels.map(\.id))
-            var out: [HeightReading] = []
-            var summary: [String] = []
-            var failures: [String] = []
-            var detail: [String] = []
-            for channel in self.profile.channels {
-                let previous = self.readings.first { $0.did == channel.did && $0.name == channel.name }
-                guard wanted.contains(channel.id) else {
-                    out.append(previous ?? HeightReading(name: channel.name,
-                                                         did: channel.did,
-                                                         value: nil,
-                                                         raw: channel.did == 0 ? "no DID" : "–"))
-                    continue
-                }
-                guard channel.did != 0 else {
-                    out.append(HeightReading(name: channel.name, did: 0, value: nil, raw: "no DID"))
-                    continue
-                }
-                do {
-                    let data = try await self.ecu.readDID(channel.did, timeout: 2)
-                    let value = channel.decode(data)
-                    out.append(HeightReading(name: channel.name,
-                                             did: channel.did,
-                                             value: value,
-                                             raw: data.hex))
-                    if let value {
-                        summary.append(String(format: "%.1f", value))
-                        detail.append(String(format: "%@ %04X=%.1f%@",
-                                             channel.name, channel.did, value,
-                                             channel.unit ?? ""))
-                    } else {
-                        detail.append(String(format: "%@ %04X=rå %@",
-                                             channel.name, channel.did, data.hex))
-                    }
-                } catch {
-                    let reason = ECUConnection.short(error)
-                    out.append(HeightReading(name: channel.name,
-                                             did: channel.did,
-                                             value: nil,
-                                             raw: "err " + reason))
-                    failures.append(String(format: "%@ %04X: %@",
-                                           channel.name, channel.did, reason))
-                    detail.append(String(format: "%@ %04X=✗ %@",
-                                         channel.name, channel.did, reason))
-                }
-            }
-            self.readings = out
-            // Do not promote `ecuOpen` from a successful read: only a
-            // module-34-specific identity DID may unlock the routine buttons.
-            if !detail.isEmpty {
-                self.transport.note("\(label): " + detail.joined(separator: " · "))
-            }
-            if !failures.isEmpty {
-                self.statusLine = "\(failures.count) fel: "
-                    + failures.prefix(4).joined(separator: " · ")
-                    + (failures.count > 4 ? " …" : "")
-            } else {
-                self.statusLine = summary.isEmpty ? "Inga värden" : summary.joined(separator: " / ")
-            }
+            let result = await self.fetch(channels)
+            self.report(result, label: label)
         }
     }
 
@@ -1170,7 +1294,9 @@ final class LevelControlService: ObservableObject {
     }
 
     func resetProfile() {
-        profile = .blank
+        var fresh = LevelProfile.blank
+        fresh.heightSchema = 22
+        profile = fresh
         levelControlEnabled = true
         rebuildReadings()
         statusLine = "Profilen är återställd"
@@ -1213,8 +1339,8 @@ final class LevelControlService: ObservableObject {
     private static func maxDuration(for role: ActionRole?) -> Double {
         guard let role else { return 25 }
         switch role {
-        case .raiseHigh, .lowerNormal, .raiseFront, .lowerFront, .raiseRear, .lowerRear,
-             .ventFront, .ventRear, .reservoirFill, .reservoirVent:
+        case .raiseHigh, .lowerNormal, .referenceLevel, .raiseFront, .lowerFront, .raiseRear,
+             .lowerRear, .ventFront, .ventRear, .reservoirFill, .reservoirVent:
             return 75
         case .levelOff, .levelOn:
             return 25
@@ -1254,6 +1380,203 @@ final class LevelControlService: ObservableObject {
             if index == 0 { try? await Task.sleep(nanoseconds: 600_000_000) }
         }
         if finished == 2 { statusLine = "\(up ? "Höjt" : "Sänkt") båda axlarna" }
+    }
+
+    /// One tap slam: switch self-levelling off, then bleed the front axle, then
+    /// the rear. Only one basic setting can run at a time, so the vents are
+    /// sequential. `Stoppa` aborts the whole sequence; the car can always be
+    /// raised again with Normal.
+    func slam() async {
+        guard ecuOpen else {
+            statusLine = "Modul 34 är inte verifierad – kör Testa anslutning eller Hitta CAN-id först"
+            return
+        }
+        guard let off = action(for: .levelOff), off.rid != 0,
+              let front = action(for: .ventFront), front.rid != 0,
+              let rear = action(for: .ventRear), rear.rid != 0 else {
+            statusLine = "Slam saknar mappad rutin (Inställningar → Funktionsmappning)"
+            return
+        }
+
+        await run("Slam") {
+            self.stopRequested = false
+            self.canStop = true
+            defer { self.canStop = false }
+            self.transport.note("slam: börjar · nivå av → vent fram → vent bak")
+
+            self.statusLine = "Slam 1/3 · nivåreglering av…"
+            self.lastAction = off
+            _ = try await self.ecu.runRoutine(off.rid,
+                                               parameters: off.parameters,
+                                               maxSeconds: 20,
+                                               shouldStop: { self.stopRequested }) { msg in
+                self.statusLine = "Slam 1/3 · nivå av · \(msg)"
+            }
+            self.levelControlEnabled = false
+            self.transport.note("slam: nivåreglering av")
+
+            try? await Task.sleep(nanoseconds: 400_000_000)
+
+            self.statusLine = "Slam 2/3 · vent fram…"
+            self.lastAction = front
+            do {
+                _ = try await self.ecu.runRoutine(front.rid,
+                                                   parameters: front.parameters,
+                                                   maxSeconds: 75,
+                                                   shouldStop: { self.stopRequested }) { msg in
+                    self.statusLine = "Slam 2/3 · vent fram · \(msg)"
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // The module often keeps a bleed active for about a minute.
+                // Reaching the ceiling means "vented enough for this phase";
+                // any other failure is logged and the rear axle is still tried.
+                self.transport.note("slam: vent fram avbröts · " + ECUConnection.short(error))
+            }
+
+            try? await Task.sleep(nanoseconds: 400_000_000)
+
+            self.statusLine = "Slam 3/3 · vent bak…"
+            self.lastAction = rear
+            do {
+                _ = try await self.ecu.runRoutine(rear.rid,
+                                                   parameters: rear.parameters,
+                                                   maxSeconds: 75,
+                                                   shouldStop: { self.stopRequested }) { msg in
+                    self.statusLine = "Slam 3/3 · vent bak · \(msg)"
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                self.transport.note("slam: vent bak avbröts · " + ECUConnection.short(error))
+            }
+
+            let result = await self.fetch(self.fastChannels)
+            self.report(result, label: "slam höjder")
+            self.statusLine = "Slam klar · " + self.heightSummary
+                + (result.failures.isEmpty ? "" : " · \(result.failures.count) värden saknas")
+            self.transport.note("slam klar: " + self.heightSummary)
+        }
+    }
+
+    /// One tap back to normal height. `03C8` activates self-levelling, which is
+    /// the routine that worked on the car; it then raises itself to its normal
+    /// level. If nothing moves within a few seconds, try the reference-level
+    /// routine and then `03E0`. Those two often need security access 20103 on a
+    /// C7, so a NRC is logged and is not fatal: level control stays on.
+    func normalLevel() async {
+        guard ecuOpen else {
+            statusLine = "Modul 34 är inte verifierad – kör Testa anslutning eller Hitta CAN-id först"
+            return
+        }
+        guard let on = action(for: .levelOn), on.rid != 0 else {
+            statusLine = "Normal saknar mappad rutin för nivåreglering på"
+            return
+        }
+
+        await run("Normal") {
+            self.stopRequested = false
+            self.canStop = true
+            defer { self.canStop = false }
+
+            let before = await self.heightSnapshot()
+            self.transport.note("normal: börjar · nivåreglering på")
+
+            self.statusLine = "Normal 1/3 · nivåreglering på…"
+            self.lastAction = on
+            _ = try await self.ecu.runRoutine(on.rid,
+                                               parameters: on.parameters,
+                                               maxSeconds: 20,
+                                               shouldStop: { self.stopRequested }) { msg in
+                self.statusLine = "Normal 1/3 · nivå på · \(msg)"
+            }
+            self.levelControlEnabled = true
+
+            self.statusLine = "Normal 2/3 · väntar på att bilen ska höja sig…"
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if self.stopRequested { throw CancellationError() }
+
+            let after = await self.heightSnapshot()
+            var moved = false
+            for (old, new) in zip(before, after) {
+                if let old = old, let new = new, new - old >= 3 {
+                    moved = true
+                    break
+                }
+            }
+            self.transport.note("normal: nivå på · rörelse " + (moved ? "ja" : "nej"))
+
+            var fallbackDenied = false
+            if !moved {
+                var referenceDone = false
+                if let reference = self.action(for: .referenceLevel), reference.rid != 0 {
+                    self.statusLine = "Normal 2/3 · referensnivå…"
+                    self.lastAction = reference
+                    do {
+                        let result = try await self.ecu.runRoutine(reference.rid,
+                                                                   parameters: reference.parameters,
+                                                                   maxSeconds: 90,
+                                                                   shouldStop: { self.stopRequested }) { msg in
+                            self.statusLine = "Normal 2/3 · referens · \(msg)"
+                        }
+                        referenceDone = true
+                        self.transport.note("normal: referensnivå klar " + result.hex)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        fallbackDenied = true
+                        self.transport.note("normal: referensnivå nekad · " + ECUConnection.short(error))
+                    }
+                }
+
+                if !referenceDone, let normal = self.action(for: .lowerNormal), normal.rid != 0 {
+                    self.statusLine = "Normal 2/3 · normalnivå…"
+                    self.lastAction = normal
+                    do {
+                        let result = try await self.ecu.runRoutine(normal.rid,
+                                                                   parameters: normal.parameters,
+                                                                   maxSeconds: 90,
+                                                                   shouldStop: { self.stopRequested }) { msg in
+                            self.statusLine = "Normal 2/3 · normalnivå · \(msg)"
+                        }
+                        fallbackDenied = false
+                        self.transport.note("normal: normalnivå klar " + result.hex)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        fallbackDenied = true
+                        self.transport.note("normal: normalnivå nekad · " + ECUConnection.short(error))
+                    }
+                }
+
+                // `03E0` leaves self-levelling off. Switch it back on even when
+                // the optional level fallbacks were denied.
+                self.statusLine = "Normal 3/3 · nivåreglering på…"
+                self.lastAction = on
+                do {
+                    _ = try await self.ecu.runRoutine(on.rid,
+                                                       parameters: on.parameters,
+                                                       maxSeconds: 20,
+                                                       shouldStop: { self.stopRequested }) { msg in
+                        self.statusLine = "Normal 3/3 · nivå på · \(msg)"
+                    }
+                    self.levelControlEnabled = true
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    fallbackDenied = true
+                    self.transport.note("normal: nivåreglering på nekades · " + ECUConnection.short(error))
+                }
+            }
+
+            let result = await self.fetch(self.fastChannels)
+            self.report(result, label: "normal höjder")
+            self.statusLine = "Normal · " + self.heightSummary
+                + " · nivåreglering på"
+                + (fallbackDenied && !moved ? " · referens nekades" : "")
+            self.transport.note("normal klar: " + self.heightSummary)
+        }
     }
 
     /// Asks a running routine to stop. The next 31 03 poll is replaced by 31 02.

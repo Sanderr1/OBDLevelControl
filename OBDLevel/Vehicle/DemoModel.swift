@@ -98,6 +98,45 @@ final class DemoModel: ObservableObject {
         ventStatus = up ? "Höjer \(axle.title) i demot." : "Sänker \(axle.title) i demot."
     }
 
+    // MARK: One-tap slam / normal
+
+    /// Same order as the real sequence: level control off, front axle, rear axle.
+    func slam() {
+        guard activeVent == nil else { return }
+        ventTask?.cancel()
+        levelOn = false
+        activeVent = .both
+        ventStatus = "Slam: nivåreglering av …"
+        ventTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            self.ventStatus = "Slam: ventilerar fram …"
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            if Task.isCancelled { return }
+            self.offsetFront = max(self.offsetFront - 30, -40)
+            self.ventStatus = "Slam: ventilerar bak …"
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            if Task.isCancelled { return }
+            self.offsetRear = max(self.offsetRear - 30, -40)
+            self.activeVent = nil
+            self.ventStatus = "Slam klar i demot. Tryck Normal för att höja tillbaka."
+        }
+    }
+
+    /// Turns level control back on and settles at the base heights.
+    func normalLevel() {
+        cancelVent()
+        levelOn = true
+        ventStatus = "Normal: nivåreglering på, höjer tillbaka …"
+        ventTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            if Task.isCancelled { return }
+            self.offsetFront = 0
+            self.offsetRear = 0
+            self.ventStatus = "Normalhöjd återställd i demot."
+        }
+    }
+
     // MARK: Reservoir
 
     func reservoir(_ action: ActionRole) {

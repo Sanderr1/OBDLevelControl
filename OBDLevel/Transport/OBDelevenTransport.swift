@@ -37,7 +37,7 @@ enum NRC {
         case 0x23: return "routineNotComplete"
         case 0x24: return "requestSequenceError"
         case 0x31: return "requestOutOfRange"
-        case 0x33: return "securityAccessDenied"
+        case 0x33: return "securityAccessDenied (rutinen kräver säkerhetskod, t.ex. 20103)"
         case 0x35: return "invalidKey"
         case 0x36: return "exceededAttempts"
         case 0x37: return "requiredTimeDelayNotExpired"
